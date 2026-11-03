@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">こえリライト</string>
+    <string name="ime_name">こえリライト（AI音声）</string>
+    <string name="a11y_name">こえリライト 画面読み取り</string>
+    <string name="a11y_desc">キーボードで音声リライトを実行した瞬間だけ、表示中の会話テキストを読み取り、返信作成の文脈としてGeminiに送ります。常時の記録や保存はしません。</string>
+</resources>
