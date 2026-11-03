@@ -31,6 +31,19 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("useScreen", true)
         set(v) = sp.edit().putBoolean("useScreen", v).apply()
 
+    var floatButton: Boolean
+        get() = sp.getBoolean("floatButton", true)
+        set(v) = sp.edit().putBoolean("floatButton", v).apply()
+
+    /** bubble position: distance from screen right edge / above keyboard top, in px (-1 = default) */
+    var bubbleRight: Int
+        get() = sp.getInt("bubbleRight", -1)
+        set(v) = sp.edit().putInt("bubbleRight", v).apply()
+
+    var bubbleAbove: Int
+        get() = sp.getInt("bubbleAbove", -1)
+        set(v) = sp.edit().putInt("bubbleAbove", v).apply()
+
     var extraRule: String
         get() = sp.getString("extraRule", "") ?: ""
         set(v) = sp.edit().putString("extraRule", v).apply()
