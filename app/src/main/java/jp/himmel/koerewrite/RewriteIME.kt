@@ -329,10 +329,10 @@ class RewriteIME : InputMethodService() {
                 jobId++
                 state = State.IDLE
                 render()
-                status.text = "タイムアウト（70秒）。⚙設定の「接続テスト」で原因を確認できます"
-                prefs.lastError = "タイムアウト（70秒） model=$procModel"
+                status.text = "タイムアウト（90秒）。⚙設定の「接続テスト」で原因を確認できます"
+                prefs.lastError = "タイムアウト（90秒） model=$procModel"
             }
-        }, 70000)
+        }, 90000)
         Thread {
             val result = try {
                 Result.success(Gemini.generate(apiKey, model, f.readBytes(), "audio/aac", img, ctx, extra,

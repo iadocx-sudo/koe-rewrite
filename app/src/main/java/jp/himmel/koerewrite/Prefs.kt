@@ -58,6 +58,6 @@ class Prefs(context: Context) {
 
     companion object {
         const val DEFAULT_MODEL = "gemini-flash-latest"
-        val FALLBACK_MODELS = listOf("gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest")
+        val FALLBACK_MODELS = listOf("gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite")
     }
 }

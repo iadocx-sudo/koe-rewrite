@@ -44,12 +44,18 @@ object Gemini {
         val models = (listOf(model) + Prefs.FALLBACK_MODELS).distinct()
         var last: GeminiException? = null
         for (m in models) {
-            onTry(m)
-            try {
-                return call(apiKey, m, audio, audioMime, image, contextText, extraRule)
-            } catch (e: GeminiException) {
-                last = e
-                if (e.code != 404) throw e
+            for (attempt in 0..1) {
+                onTry(m)
+                try {
+                    return call(apiKey, m, audio, audioMime, image, contextText, extraRule)
+                } catch (e: GeminiException) {
+                    last = e
+                    // overloaded: retry same model once after a short wait
+                    if ((e.code == 503 || e.code == 500) && attempt == 0) { Thread.sleep(1500); continue }
+                    // model missing / overloaded / per-model quota: try next model
+                    if (e.code == 404 || e.code == 503 || e.code == 500 || e.code == 429 || e.code == -3) break
+                    throw e
+                }
             }
         }
         throw last ?: GeminiException("不明なエラー", -1)
@@ -128,6 +134,7 @@ object Gemini {
                     401, 403 -> "APIキーが無効です。AI Studioでキーを確認してください。($msg)"
                     400 -> if (msg.contains("API key", true)) "APIキーが無効です。AI Studioでキーの全文をコピーし直してください。($msg)" else "リクエストエラー: $msg"
                     404 -> "モデル $model が見つかりません"
+                    500, 503 -> "Geminiが混雑中です。少し時間をおいて再試行してください。($msg)"
                     else -> "Geminiエラー $code: $msg"
                 }
                 throw GeminiException(friendly, code)
