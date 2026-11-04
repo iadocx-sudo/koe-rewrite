@@ -44,6 +44,14 @@ class Prefs(context: Context) {
         get() = sp.getInt("bubbleAbove", -1)
         set(v) = sp.edit().putInt("bubbleAbove", v).apply()
 
+    var alwaysShot: Boolean
+        get() = sp.getBoolean("alwaysShot", false)
+        set(v) = sp.edit().putBoolean("alwaysShot", v).apply()
+
+    var lastError: String
+        get() = sp.getString("lastError", "") ?: ""
+        set(v) = sp.edit().putString("lastError", v).apply()
+
     var extraRule: String
         get() = sp.getString("extraRule", "") ?: ""
         set(v) = sp.edit().putString("extraRule", v).apply()

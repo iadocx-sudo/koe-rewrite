@@ -37,6 +37,9 @@ class RewriteIME : InputMethodService() {
     private lateinit var micBtn: TextView
     private lateinit var info: TextView
     private lateinit var lastResult: TextView
+    private lateinit var shotBtn: TextView
+
+    private fun shotLabel() = if (prefs.alwaysShot) "📷 常時" else "📷 自動"
 
     private val tick = object : Runnable {
         override fun run() {
@@ -100,7 +103,7 @@ class RewriteIME : InputMethodService() {
             textSize = 12f
             setTextColor(Color.parseColor("#7A5A55"))
             gravity = Gravity.CENTER
-            maxLines = 2
+            maxLines = 3
         }
         root.addView(lastResult, LinearLayout.LayoutParams(-1, -2))
 
@@ -109,9 +112,14 @@ class RewriteIME : InputMethodService() {
             gravity = Gravity.CENTER
         }
         val lp = LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(4), dp(8), dp(4), 0) }
-        row.addView(pill("⌨ 戻る", Color.parseColor("#E8D6D2"), Color.parseColor("#3A2A28")) { cancel(); goBack() }, lp)
-        row.addView(pill("✕ 取消", Color.parseColor("#E8D6D2"), Color.parseColor("#3A2A28")) { cancel() }, LinearLayout.LayoutParams(lp))
-        row.addView(pill("⚙ 設定", Color.parseColor("#E8D6D2"), Color.parseColor("#3A2A28")) { openSettings() }, LinearLayout.LayoutParams(lp))
+        row.addView(pill("⌨戻る", Color.parseColor("#E8D6D2"), Color.parseColor("#3A2A28")) { cancel(); goBack() }, lp)
+        row.addView(pill("✕取消", Color.parseColor("#E8D6D2"), Color.parseColor("#3A2A28")) { cancel() }, LinearLayout.LayoutParams(lp))
+        shotBtn = pill(shotLabel(), Color.parseColor("#E8D6D2"), Color.parseColor("#3A2A28")) {
+            prefs.alwaysShot = !prefs.alwaysShot
+            shotBtn.text = shotLabel()
+        }
+        row.addView(shotBtn, LinearLayout.LayoutParams(lp))
+        row.addView(pill("⚙", Color.parseColor("#E8D6D2"), Color.parseColor("#3A2A28")) { openSettings() }, LinearLayout.LayoutParams(lp))
         root.addView(row, LinearLayout.LayoutParams(-1, -2))
 
         info = TextView(this).apply {
@@ -270,7 +278,8 @@ class RewriteIME : InputMethodService() {
         }
 
         val field = currentFieldText()
-        val screen = if (prefs.useScreen) try { ScreenTextService.instance?.captureText() } catch (e: Exception) { null } else null
+        val svc = if (prefs.useScreen) ScreenTextService.instance else null
+        val screen = try { svc?.captureText() } catch (e: Exception) { null }
         val pkg = currentInputEditorInfo?.packageName ?: ""
 
         val ctx = buildString {
@@ -278,27 +287,74 @@ class RewriteIME : InputMethodService() {
             if (!screen.isNullOrBlank()) append("【画面の会話】\n").append(screen).append("\n\n")
             if (field.isNotBlank()) append("【入力欄の既存テキスト】\n").append(field.take(4000)).append("\n")
         }
+        val screenLen = screen?.length ?: 0
+        val needShot = svc != null && (prefs.alwaysShot || screenLen < 40)
 
         state = State.PROCESSING
         render()
         val myJob = ++jobId
+        if (needShot) {
+            status.text = "画面を撮影中…"
+            svc!!.takeShot { img ->
+                if (myJob == jobId) send(myJob, f, ctx, field, img, screenLen)
+            }
+        } else {
+            send(myJob, f, ctx, field, null, screenLen)
+        }
+    }
+
+    private var procStart = 0L
+    private var procModel = ""
+    private val procTick = object : Runnable {
+        override fun run() {
+            if (state == State.PROCESSING) {
+                val s = (SystemClock.elapsedRealtime() - procStart) / 1000
+                status.text = "AIが文章を作成中… ${s}秒（$procModel）"
+                main.postDelayed(this, 1000)
+            }
+        }
+    }
+
+    private fun send(myJob: Int, f: File, ctx: String, field: String, img: ByteArray?, screenLen: Int) {
         val apiKey = prefs.apiKey
         val model = prefs.model
         val extra = prefs.extraRule
+        procStart = SystemClock.elapsedRealtime()
+        procModel = model
+        main.post(procTick)
+        val diag = "画面文字:${screenLen} / スクショ:${if (img != null) "あり" else "なし"} / 入力欄:${field.length}"
+        // watchdog: never stay in "作成中" forever
+        main.postDelayed({
+            if (myJob == jobId && state == State.PROCESSING) {
+                jobId++
+                state = State.IDLE
+                render()
+                status.text = "タイムアウト（70秒）。⚙設定の「接続テスト」で原因を確認できます"
+                prefs.lastError = "タイムアウト（70秒） model=$procModel"
+            }
+        }, 70000)
         Thread {
             val result = try {
-                Result.success(Gemini.generate(apiKey, model, f.readBytes(), "audio/aac", ctx, extra))
-            } catch (e: Exception) {
+                Result.success(Gemini.generate(apiKey, model, f.readBytes(), "audio/aac", img, ctx, extra,
+                    onTry = { m -> main.post { procModel = m } }))
+            } catch (e: Throwable) {
                 Result.failure(e)
             }
             main.post {
                 if (myJob != jobId) return@post
+                main.removeCallbacks(procTick)
                 f.delete()
-                result.onSuccess { insert(it, field) }
+                result.onSuccess {
+                    prefs.lastError = ""
+                    insert(it, field)
+                    lastResult.text = diag + "\n" + it.replace("\n", " ").take(60)
+                }
                 result.onFailure {
                     state = State.IDLE
                     render()
                     status.text = "失敗: ${it.message}"
+                    lastResult.text = diag
+                    prefs.lastError = it.message ?: it.javaClass.simpleName
                 }
             }
         }.start()
@@ -323,7 +379,6 @@ class RewriteIME : InputMethodService() {
         state = State.IDLE
         render()
         status.text = "✓ 入力しました"
-        lastResult.text = text.replace("\n", " ").take(80)
         if (prefs.autoReturn) {
             main.postDelayed({ if (state == State.IDLE) goBack() }, 700)
         }

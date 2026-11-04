@@ -2,6 +2,7 @@ package jp.himmel.koerewrite
 
 import android.accessibilityservice.AccessibilityService
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -11,6 +12,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.TypedValue
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -21,6 +23,7 @@ import android.view.accessibility.AccessibilityWindowInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.TextView
 import android.widget.Toast
+import java.io.ByteArrayOutputStream
 import kotlin.math.abs
 
 /**
@@ -199,6 +202,42 @@ class ScreenTextService : AccessibilityService() {
             try {
                 getSystemService(InputMethodManager::class.java)?.showInputMethodPicker()
             } catch (_: Exception) {}
+        }
+    }
+
+    // ---------------- screenshot ----------------
+
+    /** Takes a screenshot (Android 11+), returns JPEG bytes (width <= 720) or null. Callback on main thread. */
+    fun takeShot(cb: (ByteArray?) -> Unit) {
+        if (Build.VERSION.SDK_INT < 30) { cb(null); return }
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    Thread {
+                        val bytes = try {
+                            val hb = result.hardwareBuffer
+                            val hw = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
+                            val sw = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                            hb.close()
+                            if (sw == null) null else {
+                                val scaled = if (sw.width > 720)
+                                    Bitmap.createScaledBitmap(sw, 720, (sw.height * 720f / sw.width).toInt(), true)
+                                else sw
+                                val out = ByteArrayOutputStream()
+                                scaled.compress(Bitmap.CompressFormat.JPEG, 70, out)
+                                out.toByteArray()
+                            }
+                        } catch (e: Throwable) { null }
+                        main.post { cb(bytes) }
+                    }.start()
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    main.post { cb(null) }
+                }
+            })
+        } catch (e: Throwable) {
+            cb(null)
         }
     }
 

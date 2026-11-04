@@ -29,6 +29,7 @@ class SettingsActivity : Activity() {
     private lateinit var keyEdit: EditText
     private lateinit var modelEdit: EditText
     private lateinit var ruleEdit: EditText
+    private lateinit var testView: TextView
 
     private fun dp(v: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
@@ -71,6 +72,9 @@ class SettingsActivity : Activity() {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey")))
         })
         col.addView(btn("保存") { save(); toast("保存しました") })
+        col.addView(btn("接続テスト（APIキーとモデルの確認）") { runTest() })
+        testView = note("")
+        col.addView(testView)
 
         // 2 mic
         col.addView(head("② マイクを許可"))
@@ -116,6 +120,7 @@ class SettingsActivity : Activity() {
             ScreenTextService.instance?.refreshBubble()
         })
         col.addView(note("浮遊ボタンはドラッグで好きな位置に動かせます（位置は記憶）。"))
+        col.addView(check("毎回スクリーンショットも送る（オフ時は文字が読めない時だけ自動）", prefs.alwaysShot) { prefs.alwaysShot = it })
 
         col.addView(head("追加ルール（任意）"))
         ruleEdit = EditText(this).apply {
@@ -173,7 +178,25 @@ class SettingsActivity : Activity() {
         statusView.text = "${mark(prefs.apiKey.isNotBlank())} APIキー\n" +
             "${mark(mic)} マイク許可\n" +
             "${mark(imeOn)} キーボード有効\n" +
-            "${mark(a11y)} 画面読み取り（任意）"
+            "${mark(a11y)} 画面読み取り（任意）" +
+            (if (prefs.lastError.isNotBlank()) "\n\n直近のエラー: ${prefs.lastError}" else "")
+    }
+
+    private fun runTest() {
+        save()
+        val key = prefs.apiKey
+        if (key.isBlank()) { testView.text = "APIキーが空です"; return }
+        testView.text = "テスト中…"
+        val model = prefs.model
+        val t0 = System.currentTimeMillis()
+        Thread {
+            val msg = try {
+                "✅ 成功（${System.currentTimeMillis() - t0}ms）: " + Gemini.test(key, model)
+            } catch (e: Throwable) {
+                "❌ 失敗（${System.currentTimeMillis() - t0}ms）: ${e.message}"
+            }
+            runOnUiThread { testView.text = msg }
+        }.start()
     }
 
     private fun lpTop(top: Int) = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(top) }
