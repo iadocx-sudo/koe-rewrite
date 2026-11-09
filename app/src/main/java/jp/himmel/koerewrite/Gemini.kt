@@ -47,13 +47,7 @@ object Gemini {
             for (attempt in 0..1) {
                 onTry(m)
                 try {
-                    return try {
-                        call(apiKey, m, audio, audioMime, image, contextText, extraRule, thinkingOff = true)
-                    } catch (e: GeminiException) {
-                        if (e.code == 400 && e.message.orEmpty().contains("thinking", true))
-                            call(apiKey, m, audio, audioMime, image, contextText, extraRule, thinkingOff = false)
-                        else throw e
-                    }
+                    return callAnyMode(apiKey, m, audio, audioMime, image, contextText, extraRule)
                 } catch (e: GeminiException) {
                     last = e
                     // overloaded: retry same model once after a short wait
@@ -67,12 +61,34 @@ object Gemini {
         throw last ?: GeminiException("不明なエラー", -1)
     }
 
+    /** thinking settings to try, fastest first; the last one (no config) always works. */
+    private val modeCache = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private const val MODES = 3
+
+    private fun callAnyMode(
+        apiKey: String, model: String, audio: ByteArray?, audioMime: String,
+        image: ByteArray?, contextText: String, extraRule: String,
+    ): String {
+        var mode = modeCache[model] ?: 0
+        while (true) {
+            try {
+                val r = call(apiKey, model, audio, audioMime, image, contextText, extraRule, mode)
+                modeCache[model] = mode
+                return r
+            } catch (e: GeminiException) {
+                val keyProblem = e.message.orEmpty().contains("API key", true)
+                if (e.code == 400 && !keyProblem && mode < MODES - 1) { mode++; continue }
+                throw e
+            }
+        }
+    }
+
     /** Text-only connectivity test. Returns "model: reply". */
     fun test(apiKey: String, model: String): String {
         var used = model
         val out = generate(apiKey, model, null, "", null,
             "【接続テスト】「OK」とだけ出力してください。", "", onTry = { used = it })
-        return "$used → $out"
+        return "$used（思考設定${modeCache[used] ?: "-"}）→ $out"
     }
 
     private fun call(
@@ -83,7 +99,7 @@ object Gemini {
         image: ByteArray?,
         contextText: String,
         extraRule: String,
-        thinkingOff: Boolean,
+        thinkingMode: Int,
     ): String {
         val sys = if (extraRule.isBlank()) SYSTEM_PROMPT
         else SYSTEM_PROMPT + "\n\nユーザー固有の追加ルール:\n" + extraRule.trim()
@@ -116,7 +132,11 @@ object Gemini {
                 put("parts", parts)
             }))
             val gc = JSONObject().put("temperature", 0.3)
-            if (thinkingOff) gc.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+            when (thinkingMode) {
+                0 -> gc.put("thinkingConfig", JSONObject().put("thinkingLevel", "minimal"))
+                1 -> gc.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+                else -> {}
+            }
             put("generationConfig", gc)
         }
 
