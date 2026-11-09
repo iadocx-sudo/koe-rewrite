@@ -119,7 +119,7 @@ class ScreenTextService : AccessibilityService() {
         }
         val size = dp(52)
         val v = TextView(this).apply {
-            text = "🎤"
+            text = "✨"
             textSize = 22f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
@@ -161,6 +161,8 @@ class ScreenTextService : AccessibilityService() {
                         val screenW = resources.displayMetrics.widthPixels
                         prefs.bubbleRight = (screenW - lp.x - size).coerceAtLeast(0)
                         prefs.bubbleAbove = (kbTop - lp.y - size).coerceAtLeast(0)
+                    } else if (e.eventTime - e.downTime > 600) {
+                        switchToVoice()
                     } else {
                         onBubbleTap()
                     }
@@ -186,23 +188,111 @@ class ScreenTextService : AccessibilityService() {
         try { wm?.removeView(v) } catch (_: Exception) {}
     }
 
+    // ---- tap: rewrite the whole input field in place ----
+
+    private var busy = false
+    private var undoOriginal: String? = null
+    private var undoRewritten: String? = null
+    private var undoUntil = 0L
+
+    private fun setBubbleLook(label: String, color: String) {
+        val v = bubble ?: return
+        v.text = label
+        (v.background as? GradientDrawable)?.setColor(Color.parseColor(color))
+    }
+
+    private fun focusedEditable(): AccessibilityNodeInfo? {
+        val n = try { findFocus(AccessibilityNodeInfo.FOCUS_INPUT) } catch (e: Exception) { null }
+        return if (n != null && n.isEditable) n else null
+    }
+
+    private fun fieldText(n: AccessibilityNodeInfo): String {
+        if (Build.VERSION.SDK_INT >= 26 && n.isShowingHintText) return ""
+        return n.text?.toString() ?: ""
+    }
+
+    private fun setFieldText(n: AccessibilityNodeInfo, text: String): Boolean {
+        val b = android.os.Bundle()
+        b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        val ok = n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b)
+        if (ok) {
+            val sel = android.os.Bundle()
+            sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, text.length)
+            sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, text.length)
+            n.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, sel)
+        }
+        return ok
+    }
+
+    private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+
     private fun onBubbleTap() {
+        if (busy) return
+        val node = focusedEditable()
+        val text = node?.let { fieldText(it) }.orEmpty()
+        if (node == null || text.isBlank()) {
+            toast("入力欄に文章を書いてからタップ（長押しで音声入力）")
+            return
+        }
+        // undo within 15s
+        val now = System.currentTimeMillis()
+        if (undoOriginal != null && now < undoUntil && text == undoRewritten) {
+            setFieldText(node, undoOriginal!!)
+            undoOriginal = null
+            toast("元に戻しました")
+            return
+        }
+        if (prefs.apiKey.isBlank()) { toast("こえリライトの設定でAPIキーを登録してください"); return }
+
+        busy = true
+        setBubbleLook("…", "#BDBDBD")
+        val screen = if (prefs.useScreen) try { captureText(2500) } catch (e: Exception) { null } else null
+        val apiKey = prefs.apiKey
+        val model = prefs.model
+        val extra = prefs.extraRule
+        val t0 = System.currentTimeMillis()
+        Thread {
+            val result = try {
+                Result.success(Gemini.rewriteText(apiKey, model, text, screen, extra))
+            } catch (e: Throwable) { Result.failure(e) }
+            main.post {
+                busy = false
+                setBubbleLook("✨", "#FA8072")
+                result.onSuccess { out ->
+                    val target = focusedEditable() ?: node
+                    if (setFieldText(target, out)) {
+                        undoOriginal = text
+                        undoRewritten = out
+                        undoUntil = System.currentTimeMillis() + 15000
+                        prefs.lastError = ""
+                        toast("リライトしました（${(System.currentTimeMillis() - t0) / 1000}秒）。15秒以内にもう一度タップで元に戻す")
+                    } else {
+                        val cm = getSystemService(android.content.ClipboardManager::class.java)
+                        cm?.setPrimaryClip(android.content.ClipData.newPlainText("rewrite", out))
+                        toast("この欄には直接入れられないため、コピーしました。貼り付けてください")
+                    }
+                }
+                result.onFailure {
+                    prefs.lastError = it.message ?: it.javaClass.simpleName
+                    toast("失敗: ${it.message}")
+                }
+            }
+        }.start()
+    }
+
+    /** long press: switch to the voice keyboard */
+    private fun switchToVoice() {
         val id = ourImeId()
         if (id == null) {
-            Toast.makeText(this, "こえリライトのキーボードを有効にしてください", Toast.LENGTH_SHORT).show()
+            toast("こえリライトのキーボードを有効にしてください")
             return
         }
         var ok = false
         if (Build.VERSION.SDK_INT >= 30) {
             ok = try { softKeyboardController.switchToInputMethod(id) } catch (e: Exception) { false }
         }
-        if (ok) {
-            hideBubble()
-        } else {
-            try {
-                getSystemService(InputMethodManager::class.java)?.showInputMethodPicker()
-            } catch (_: Exception) {}
-        }
+        if (ok) hideBubble()
+        else try { getSystemService(InputMethodManager::class.java)?.showInputMethodPicker() } catch (_: Exception) {}
     }
 
     // ---------------- screenshot ----------------

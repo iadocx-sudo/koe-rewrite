@@ -115,7 +115,7 @@ class SettingsActivity : Activity() {
         col.addView(check("入力後、自動でGboardに戻る", prefs.autoReturn) { prefs.autoReturn = it })
         col.addView(check("入力欄の文字（貼り付けた相手の文など）を結果で置き換える", prefs.replaceField) { prefs.replaceField = it })
         col.addView(check("画面の会話を文脈に使う", prefs.useScreen) { prefs.useScreen = it })
-        col.addView(check("Gboard表示中に浮遊マイクボタンを出す（④が必要）", prefs.floatButton) {
+        col.addView(check("Gboard表示中に✨ボタンを出す（タップ=入力欄をAIリライト／長押し=音声入力）④が必要", prefs.floatButton) {
             prefs.floatButton = it
             ScreenTextService.instance?.refreshBubble()
         })

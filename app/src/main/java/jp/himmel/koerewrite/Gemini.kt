@@ -30,6 +30,29 @@ object Gemini {
 - 出力は完成した本文だけ。説明、引用符、見出し、複数案は出さない。
 """.trimIndent()
 
+    val REWRITE_PROMPT = """
+あなたは日本語の文章整形アシスタントです。
+【下書き】は、ユーザーが思いつくまま入力した文章です（音声入力の誤変換、句読点なし、言い直し、話し言葉を含む）。
+これを、そのまま送信できる自然で読みやすい文章に整えてください。
+
+ルール:
+- 内容・意図・情報量は変えない。話題や事実を足さない。大事な内容を削らない。
+- 誤変換、句読点、改行、語順を整え、重複・言い直し・フィラー（えーと等）を除く。
+- 下書きの中に「うまい返信にして」「丁寧に」「短く」などAIへの指示が含まれていれば、それに従う。指示の文自体は出力に含めない。
+- 口調は下書きの口調に合わせる（友人向けならくだけたまま、仕事なら簡潔なビジネス口調）。指示がない限り、勝手に敬語化しない。
+- 【画面の会話】がある場合は、相手との関係や口調、「それ」「あれ」の指す内容の参考にだけ使う。[左]=相手、[右]=ユーザー本人。
+- AIっぽい過剰な丁寧さ、前置き、美辞麗句は避ける。
+- 出力は整えた本文だけ。説明、引用符、見出し、複数案は出さない。
+""".trimIndent()
+
+    fun rewriteText(apiKey: String, model: String, draft: String, screen: String?, extraRule: String): String {
+        val ctx = buildString {
+            if (!screen.isNullOrBlank()) append("【画面の会話（参考）】\n").append(screen).append("\n\n")
+            append("【下書き】\n").append(draft)
+        }
+        return generate(apiKey, model, null, "", null, ctx, extraRule, system = REWRITE_PROMPT)
+    }
+
     /** Tries the given model, then fallbacks only when the model is not found (404). */
     fun generate(
         apiKey: String,
@@ -40,6 +63,7 @@ object Gemini {
         contextText: String,
         extraRule: String,
         onTry: (String) -> Unit = {},
+        system: String = SYSTEM_PROMPT,
     ): String {
         val models = (listOf(model) + Prefs.FALLBACK_MODELS).distinct()
         var last: GeminiException? = null
@@ -47,7 +71,7 @@ object Gemini {
             for (attempt in 0..1) {
                 onTry(m)
                 try {
-                    return callAnyMode(apiKey, m, audio, audioMime, image, contextText, extraRule)
+                    return callAnyMode(apiKey, m, audio, audioMime, image, contextText, extraRule, system)
                 } catch (e: GeminiException) {
                     last = e
                     // overloaded: retry same model once after a short wait
@@ -67,12 +91,12 @@ object Gemini {
 
     private fun callAnyMode(
         apiKey: String, model: String, audio: ByteArray?, audioMime: String,
-        image: ByteArray?, contextText: String, extraRule: String,
+        image: ByteArray?, contextText: String, extraRule: String, system: String,
     ): String {
         var mode = modeCache[model] ?: 0
         while (true) {
             try {
-                val r = call(apiKey, model, audio, audioMime, image, contextText, extraRule, mode)
+                val r = call(apiKey, model, audio, audioMime, image, contextText, extraRule, mode, system)
                 modeCache[model] = mode
                 return r
             } catch (e: GeminiException) {
@@ -100,9 +124,10 @@ object Gemini {
         contextText: String,
         extraRule: String,
         thinkingMode: Int,
+        system: String,
     ): String {
-        val sys = if (extraRule.isBlank()) SYSTEM_PROMPT
-        else SYSTEM_PROMPT + "\n\nユーザー固有の追加ルール:\n" + extraRule.trim()
+        val sys = if (extraRule.isBlank()) system
+        else system + "\n\nユーザー固有の追加ルール:\n" + extraRule.trim()
 
         val userText = buildString {
             if (contextText.isNotBlank()) {
