@@ -113,9 +113,8 @@ class SettingsActivity : Activity() {
         col.addView(head("⑤ 動作"))
         col.addView(check("キーボードを開いたら自動で録音開始", prefs.autoStart) { prefs.autoStart = it })
         col.addView(check("入力後、自動でGboardに戻る", prefs.autoReturn) { prefs.autoReturn = it })
-        col.addView(check("入力欄の文字（貼り付けた相手の文など）を結果で置き換える", prefs.replaceField) { prefs.replaceField = it })
         col.addView(check("画面の会話を文脈に使う", prefs.useScreen) { prefs.useScreen = it })
-        col.addView(check("キーボード表示中に✨🎤ボタンを出す（✨=入力欄をAIリライト／🎤=音声入力）④が必要", prefs.floatButton) {
+        col.addView(check("キーボード表示中に✨ボタンを出す（タップ=AIリライト／長押し=音声入力）④が必要", prefs.floatButton) {
             prefs.floatButton = it
             ScreenTextService.instance?.refreshBubble()
         })

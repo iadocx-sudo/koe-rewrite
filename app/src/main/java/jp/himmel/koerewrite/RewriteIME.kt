@@ -439,7 +439,7 @@ class RewriteIME : InputMethodService() {
                 val secs = (SystemClock.elapsedRealtime() - procStart) / 1000
                 result.onSuccess {
                     prefs.lastError = ""
-                    insert(it, field, replace = true)
+                    insert(it, field, replace = false)
                     status.text = "✓ 入力しました（AI ${secs}秒）"
                 }
                 result.onFailure {

@@ -62,13 +62,17 @@ class ScreenTextService : AccessibilityService() {
         super.onDestroy()
     }
 
+    private val updaterLate1 = Runnable { updateBubble() }
+    private val updaterLate2 = Runnable { updateBubble() }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        val t = event?.eventType ?: return
-        if (t == AccessibilityEvent.TYPE_WINDOWS_CHANGED || t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-            t == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
-            main.removeCallbacks(updater)
-            main.postDelayed(updater, 120)
-        }
+        if (event == null) return
+        main.removeCallbacks(updater)
+        main.postDelayed(updater, 120)
+        main.removeCallbacks(updaterLate1)
+        main.postDelayed(updaterLate1, 600)
+        main.removeCallbacks(updaterLate2)
+        main.postDelayed(updaterLate2, 1500)
     }
 
     override fun onInterrupt() {}
@@ -102,8 +106,8 @@ class ScreenTextService : AccessibilityService() {
         main.postDelayed(updater, 1500)
     }
 
-    private fun bubbleW() = dp(48)
-    private fun bubbleH() = dp(48) * 2 + dp(8)
+    private fun bubbleW() = dp(58)
+    private fun bubbleH() = dp(86)
 
     private fun positionLp(lp: WindowManager.LayoutParams) {
         val screenW = resources.displayMetrics.widthPixels
@@ -113,55 +117,8 @@ class ScreenTextService : AccessibilityService() {
         lp.y = (kbTop - above - bubbleH()).coerceAtLeast(0)
     }
 
-    private fun circle(label: String, color: String) = TextView(this).apply {
-        text = label
-        textSize = 20f
-        gravity = Gravity.CENTER
-        setTextColor(Color.WHITE)
-        background = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(Color.parseColor(color))
-            setStroke(dp(2), Color.WHITE)
-        }
-        elevation = dp(5).toFloat()
-    }
-
+    /** One button: big ✨ (tap = rewrite), small "長押し🎤" strip (long press = voice). */
     @SuppressLint("ClickableViewAccessibility")
-    private fun attachTouch(v: View, container: View, lp: WindowManager.LayoutParams, onTap: () -> Unit) {
-        val w = wm ?: return
-        var downX = 0f; var downY = 0f; var startX = 0; var startY = 0; var moved = false
-        v.setOnTouchListener { _, e ->
-            when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    downX = e.rawX; downY = e.rawY; startX = lp.x; startY = lp.y; moved = false
-                    v.alpha = 0.7f
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = e.rawX - downX; val dy = e.rawY - downY
-                    if (!moved && (abs(dx) > dp(10) || abs(dy) > dp(10))) moved = true
-                    if (moved) {
-                        lp.x = (startX + dx).toInt()
-                        lp.y = (startY + dy).toInt().coerceAtLeast(0)
-                        try { w.updateViewLayout(container, lp) } catch (_: Exception) {}
-                    }
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    v.alpha = 1f
-                    if (moved) {
-                        val screenW = resources.displayMetrics.widthPixels
-                        prefs.bubbleRight = (screenW - lp.x - bubbleW()).coerceAtLeast(0)
-                        prefs.bubbleAbove = (kbTop - lp.y - bubbleH()).coerceAtLeast(0)
-                    } else onTap()
-                    true
-                }
-                MotionEvent.ACTION_CANCEL -> { v.alpha = 1f; true }
-                else -> false
-            }
-        }
-    }
-
     private fun showBubble() {
         val w = wm ?: return
         val existing = bubble
@@ -181,13 +138,78 @@ class ScreenTextService : AccessibilityService() {
 
         val box = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(20).toFloat()
+                setColor(Color.parseColor("#FA8072"))
+                setStroke(dp(2), Color.WHITE)
+            }
         }
-        val rw = circle("✨", "#FA8072")
-        val vc = circle("🎤", "#E57373")
-        box.addView(rw, android.widget.LinearLayout.LayoutParams(bubbleW(), bubbleW()))
-        box.addView(vc, android.widget.LinearLayout.LayoutParams(bubbleW(), bubbleW()).apply { topMargin = dp(8) })
-        attachTouch(rw, box, lp) { onBubbleTap() }
-        attachTouch(vc, box, lp) { switchToVoice() }
+        val rw = TextView(this).apply {
+            text = "✨"
+            textSize = 26f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+        }
+        val div = View(this).apply { setBackgroundColor(Color.parseColor("#CCFFFFFF")) }
+        val hint = TextView(this).apply {
+            text = "長押し🎤"
+            textSize = 10f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        box.addView(rw, android.widget.LinearLayout.LayoutParams(-1, 0, 1f))
+        box.addView(div, android.widget.LinearLayout.LayoutParams(-1, dp(1)).apply { leftMargin = dp(8); rightMargin = dp(8) })
+        box.addView(hint, android.widget.LinearLayout.LayoutParams(-1, dp(28)))
+
+        var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
+        var moved = false; var longFired = false
+        val longPress = Runnable {
+            if (!moved) {
+                longFired = true
+                box.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                box.alpha = 1f
+                switchToVoice()
+            }
+        }
+        box.setOnTouchListener { _, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.rawX; downY = e.rawY; startX = lp.x; startY = lp.y
+                    moved = false; longFired = false
+                    box.alpha = 0.7f
+                    main.postDelayed(longPress, 450)
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - downX; val dy = e.rawY - downY
+                    if (!moved && (abs(dx) > dp(10) || abs(dy) > dp(10))) {
+                        moved = true
+                        main.removeCallbacks(longPress)
+                    }
+                    if (moved && !longFired) {
+                        lp.x = (startX + dx).toInt()
+                        lp.y = (startY + dy).toInt().coerceAtLeast(0)
+                        try { w.updateViewLayout(box, lp) } catch (_: Exception) {}
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    main.removeCallbacks(longPress)
+                    box.alpha = 1f
+                    if (longFired) {
+                        // already handled
+                    } else if (moved) {
+                        val screenW = resources.displayMetrics.widthPixels
+                        prefs.bubbleRight = (screenW - lp.x - bubbleW()).coerceAtLeast(0)
+                        prefs.bubbleAbove = (kbTop - lp.y - bubbleH()).coerceAtLeast(0)
+                    } else onBubbleTap()
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> { main.removeCallbacks(longPress); box.alpha = 1f; true }
+                else -> false
+            }
+        }
         try {
             w.addView(box, lp)
             bubble = box
@@ -219,7 +241,7 @@ class ScreenTextService : AccessibilityService() {
     private fun setBubbleLook(label: String, color: String) {
         val v = rewriteBtn ?: return
         v.text = label
-        (v.background as? GradientDrawable)?.setColor(Color.parseColor(color))
+        (bubble?.background as? GradientDrawable)?.setColor(Color.parseColor(color))
     }
 
     private fun focusedEditable(): AccessibilityNodeInfo? {
@@ -252,7 +274,7 @@ class ScreenTextService : AccessibilityService() {
         val node = focusedEditable()
         val text = node?.let { fieldText(it) }.orEmpty()
         if (node == null || text.isBlank()) {
-            toast("入力欄に文章を書いてから✨をタップ（🎤は音声入力）")
+            toast("入力欄に文章を書いてから✨をタップ（長押しで音声入力）")
             return
         }
         // undo within 15s
