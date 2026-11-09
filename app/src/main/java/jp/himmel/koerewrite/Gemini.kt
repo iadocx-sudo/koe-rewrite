@@ -15,19 +15,19 @@ object Gemini {
 あなたは、ユーザー本人の代わりに送信用の文章を作る日本語の文章アシスタントです。
 
 入力:
-(1) 音声: ユーザーの発話。「うまい返信にして」「丁寧に」「要約して」などの指示と、伝えたい内容が混ざっていることがある。
-(2) 画面の会話（ある場合）: 表示中アプリから読み取ったテキスト。[左]=相手、[右]=ユーザー本人、[中]=判別不能やUI。
-(3) 画面のスクリーンショット（ある場合）: 会話画面の画像。チャットでは右側の吹き出し=ユーザー本人、左側=相手。下部のキーボードは無視する。
-(4) 入力欄の既存テキスト（ある場合）: 貼り付けた相手のメッセージ、または下書き。
+- 【ユーザーの発話（音声認識結果）】: 最重要。「うまい返信にして」などの指示と、伝えたい内容が混ざる。音声認識の誤変換を含むことがある。
+- 【画面の会話（参考）】: 表示中アプリの文字。[左]=相手、[右]=ユーザー本人。
+- 【入力欄の既存テキスト】: 貼り付けた相手のメッセージや下書き。
+- 画像（ある場合）: 画面のスクリーンショット。参考情報。
 
-ルール:
-- 発話から「指示」と「内容」を分けて解釈する。
-- 指示がない場合: 発話内容を、そのまま送れる自然な文章に整える（フィラー・言い直し・重複を除去、句読点を整える。意味は変えない）。
-- 「うまい返信」「返信して」等の場合: 画面の会話・入力欄の文脈を踏まえ、ユーザーが言いたい趣旨を保ったまま、自然で感じのよい返信文にする。
-- 口調・距離感・絵文字の有無は、これまでのやり取りとユーザー本人の過去の発言に合わせる。友人なら砕けた口語、仕事なら簡潔なビジネス口調。
-- AIっぽい過剰な丁寧さ、長い前置き、美辞麗句は避ける。
-- ユーザーが言っていない事実・約束・日時を作らない。
-- 出力は完成した本文だけ。説明、前置き、引用符、見出し、複数案は出さない。
+最重要ルール:
+- 本文の中身は「発話」から作る。画面の会話は、口調・相手との距離感・「それ」「あれ」等の指す内容を補うためだけに使う。
+- 発話にない話題・事実・提案・約束を足さない。画面の会話から返信内容を推測して創作しない。
+- 発話に指示がなければ、発話内容をそのまま送れる文章に整えるだけ（誤変換・句読点・言い直し・フィラーの修正のみ。意味や情報量は変えない）。
+- 「うまい返信にして」「丁寧に」等の指示があれば、その指示語自体は本文に含めず、発話の内容をその指示どおりに整える。
+- 口調は、ユーザー本人の過去の発言（[右]）に合わせる。友人なら砕けた口語、仕事なら簡潔なビジネス口調。
+- AIっぽい過剰な丁寧さ、前置き、美辞麗句は避ける。発話より大幅に長くしない。
+- 出力は完成した本文だけ。説明、引用符、見出し、複数案は出さない。
 """.trimIndent()
 
     /** Tries the given model, then fallbacks only when the model is not found (404). */
@@ -47,7 +47,13 @@ object Gemini {
             for (attempt in 0..1) {
                 onTry(m)
                 try {
-                    return call(apiKey, m, audio, audioMime, image, contextText, extraRule)
+                    return try {
+                        call(apiKey, m, audio, audioMime, image, contextText, extraRule, thinkingOff = true)
+                    } catch (e: GeminiException) {
+                        if (e.code == 400 && e.message.orEmpty().contains("thinking", true))
+                            call(apiKey, m, audio, audioMime, image, contextText, extraRule, thinkingOff = false)
+                        else throw e
+                    }
                 } catch (e: GeminiException) {
                     last = e
                     // overloaded: retry same model once after a short wait
@@ -77,6 +83,7 @@ object Gemini {
         image: ByteArray?,
         contextText: String,
         extraRule: String,
+        thinkingOff: Boolean,
     ): String {
         val sys = if (extraRule.isBlank()) SYSTEM_PROMPT
         else SYSTEM_PROMPT + "\n\nユーザー固有の追加ルール:\n" + extraRule.trim()
@@ -108,14 +115,16 @@ object Gemini {
                 put("role", "user")
                 put("parts", parts)
             }))
-            put("generationConfig", JSONObject().put("temperature", 0.4))
+            val gc = JSONObject().put("temperature", 0.3)
+            if (thinkingOff) gc.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+            put("generationConfig", gc)
         }
 
         val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 15000
-            readTimeout = 40000
+            readTimeout = 30000
             doOutput = true
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
             setRequestProperty("x-goog-api-key", apiKey)

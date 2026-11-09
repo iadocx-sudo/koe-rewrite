@@ -120,7 +120,7 @@ class SettingsActivity : Activity() {
             ScreenTextService.instance?.refreshBubble()
         })
         col.addView(note("浮遊ボタンはドラッグで好きな位置に動かせます（位置は記憶）。"))
-        col.addView(check("毎回スクリーンショットも送る（オフ時は文字が読めない時だけ自動）", prefs.alwaysShot) { prefs.alwaysShot = it })
+        col.addView(check("スクリーンショットも送る（通常はOFF推奨。遅くなります）", prefs.alwaysShot) { prefs.alwaysShot = it })
 
         col.addView(head("追加ルール（任意）"))
         ruleEdit = EditText(this).apply {

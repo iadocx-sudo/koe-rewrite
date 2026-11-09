@@ -7,11 +7,13 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
-import android.media.MediaRecorder
-import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -19,37 +21,33 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.ExtractedTextRequest
 import android.widget.LinearLayout
 import android.widget.TextView
-import java.io.File
 
+/**
+ * Flow: speech -> Android/Google speech recognizer (same engine family as Gboard voice typing,
+ * fast & accurate) -> transcript + screen text -> Gemini (text only, thinking off) -> insert.
+ */
 class RewriteIME : InputMethodService() {
 
-    private enum class State { IDLE, RECORDING, PROCESSING }
+    private enum class State { IDLE, LISTENING, PROCESSING }
 
     private val main = Handler(Looper.getMainLooper())
     private lateinit var prefs: Prefs
     private var state = State.IDLE
-    private var recorder: MediaRecorder? = null
-    private var audioFile: File? = null
-    private var recStart = 0L
     private var jobId = 0
+
+    private var recognizer: SpeechRecognizer? = null
+    private val committed = StringBuilder()
+    private var partial = ""
+    private var stopRequested = false
+    private var listenStart = 0L
 
     private lateinit var status: TextView
     private lateinit var micBtn: TextView
     private lateinit var info: TextView
-    private lateinit var lastResult: TextView
+    private lateinit var transcriptView: TextView
     private lateinit var shotBtn: TextView
 
-    private fun shotLabel() = if (prefs.alwaysShot) "📷 常時" else "📷 自動"
-
-    private val tick = object : Runnable {
-        override fun run() {
-            if (state == State.RECORDING) {
-                val s = (SystemClock.elapsedRealtime() - recStart) / 1000
-                status.text = "● 録音中 %d:%02d　話し終えたらマイクをタップ".format(s / 60, s % 60)
-                main.postDelayed(this, 500)
-            }
-        }
-    }
+    private fun shotLabel() = if (prefs.alwaysShot) "📷 ON" else "📷 OFF"
 
     override fun onCreate() {
         super.onCreate()
@@ -59,16 +57,16 @@ class RewriteIME : InputMethodService() {
     private fun dp(v: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
 
-    private fun pill(text: String, bg: Int, fg: Int, onClick: () -> Unit): TextView =
+    private fun pill(text: String, onClick: () -> Unit): TextView =
         TextView(this).apply {
             this.text = text
-            setTextColor(fg)
-            textSize = 15f
+            setTextColor(Color.parseColor("#3A2A28"))
+            textSize = 14f
             gravity = Gravity.CENTER
-            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setPadding(dp(8), dp(10), dp(8), dp(10))
             background = GradientDrawable().apply {
                 cornerRadius = dp(22).toFloat()
-                setColor(bg)
+                setColor(Color.parseColor("#E8D6D2"))
             }
             setOnClickListener { onClick() }
         }
@@ -77,7 +75,7 @@ class RewriteIME : InputMethodService() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#FDF1EE"))
-            setPadding(dp(12), dp(10), dp(12), dp(12))
+            setPadding(dp(12), dp(8), dp(12), dp(10))
         }
 
         status = TextView(this).apply {
@@ -87,39 +85,40 @@ class RewriteIME : InputMethodService() {
         }
         root.addView(status, LinearLayout.LayoutParams(-1, -2))
 
+        transcriptView = TextView(this).apply {
+            textSize = 15f
+            setTextColor(Color.parseColor("#2A1A18"))
+            gravity = Gravity.CENTER
+            maxLines = 4
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+        }
+        root.addView(transcriptView, LinearLayout.LayoutParams(-1, -2))
+
         micBtn = TextView(this).apply {
-            text = "🎤"
-            textSize = 40f
+            textSize = 34f
             gravity = Gravity.CENTER
             setOnClickListener { onMic() }
         }
-        val micLp = LinearLayout.LayoutParams(dp(110), dp(110)).apply {
+        val micLp = LinearLayout.LayoutParams(dp(96), dp(96)).apply {
             gravity = Gravity.CENTER_HORIZONTAL
-            topMargin = dp(10); bottomMargin = dp(8)
+            topMargin = dp(6); bottomMargin = dp(4)
         }
         root.addView(micBtn, micLp)
-
-        lastResult = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.parseColor("#7A5A55"))
-            gravity = Gravity.CENTER
-            maxLines = 3
-        }
-        root.addView(lastResult, LinearLayout.LayoutParams(-1, -2))
 
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val lp = LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(4), dp(8), dp(4), 0) }
-        row.addView(pill("⌨戻る", Color.parseColor("#E8D6D2"), Color.parseColor("#3A2A28")) { cancel(); goBack() }, lp)
-        row.addView(pill("✕取消", Color.parseColor("#E8D6D2"), Color.parseColor("#3A2A28")) { cancel() }, LinearLayout.LayoutParams(lp))
-        shotBtn = pill(shotLabel(), Color.parseColor("#E8D6D2"), Color.parseColor("#3A2A28")) {
+        val lp = LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(4), dp(6), dp(4), 0) }
+        row.addView(pill("⌨戻る") { cancel(); goBack() }, lp)
+        row.addView(pill("✕取消") { cancel() }, LinearLayout.LayoutParams(lp))
+        row.addView(pill("そのまま") { insertRawNow() }, LinearLayout.LayoutParams(lp))
+        shotBtn = pill(shotLabel()) {
             prefs.alwaysShot = !prefs.alwaysShot
             shotBtn.text = shotLabel()
         }
         row.addView(shotBtn, LinearLayout.LayoutParams(lp))
-        row.addView(pill("⚙", Color.parseColor("#E8D6D2"), Color.parseColor("#3A2A28")) { openSettings() }, LinearLayout.LayoutParams(lp))
+        row.addView(pill("⚙") { openSettings() }, LinearLayout.LayoutParams(lp))
         root.addView(row, LinearLayout.LayoutParams(-1, -2))
 
         info = TextView(this).apply {
@@ -137,28 +136,29 @@ class RewriteIME : InputMethodService() {
     override fun onStartInputView(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(attribute, restarting)
         if (!::status.isInitialized) return
+        shotBtn.text = shotLabel()
         render()
         if (!restarting && state == State.IDLE && prefs.autoStart && ready()) {
-            startRecording()
+            startListening()
         }
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
-        if (state == State.RECORDING) cancel()
+        if (state == State.LISTENING) cancel()
         super.onFinishInputView(finishingInput)
     }
 
     override fun onDestroy() {
-        stopRecorder()
+        destroyRecognizer()
         super.onDestroy()
     }
 
-    // ---- UI state ----
+    // ---- UI ----
 
     private fun render() {
         val (color, label) = when (state) {
             State.IDLE -> "#FA8072" to "🎤"
-            State.RECORDING -> "#E53935" to "■"
+            State.LISTENING -> "#E53935" to "■"
             State.PROCESSING -> "#BDBDBD" to "…"
         }
         micBtn.text = label
@@ -172,13 +172,14 @@ class RewriteIME : InputMethodService() {
             State.IDLE -> status.text = when {
                 prefs.apiKey.isBlank() -> "⚙ 設定でGemini APIキーを登録してください"
                 !hasMic() -> "⚙ 設定でマイクを許可してください"
-                else -> "マイクをタップして話す（例：「うまい返信にして、〇〇って伝えたい」）"
+                else -> "🎤をタップして話す（例：「うまい返信にして、〇〇って伝えたい」）"
             }
-            State.RECORDING -> status.text = "● 録音中　話し終えたらマイクをタップ"
-            State.PROCESSING -> status.text = "AIが文章を作成中…"
+            State.LISTENING -> status.text = "● 聞き取り中…　話し終えたら■をタップ"
+            State.PROCESSING -> {}
         }
         val screenOn = ScreenTextService.instance != null && prefs.useScreen
-        info.text = "画面読み取り: " + (if (screenOn) "ON" else "OFF") + "　/　入力欄の文字も文脈に使用"
+        info.text = "画面読み取り: " + (if (screenOn) "ON" else "OFF") +
+            "　「そのまま」=AIを通さず文字起こしだけ入力"
     }
 
     private fun hasMic() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -188,9 +189,9 @@ class RewriteIME : InputMethodService() {
         when (state) {
             State.IDLE -> {
                 if (!ready()) { openSettings(); return }
-                startRecording()
+                startListening()
             }
-            State.RECORDING -> finishAndSend()
+            State.LISTENING -> requestStop()
             State.PROCESSING -> {}
         }
     }
@@ -204,56 +205,154 @@ class RewriteIME : InputMethodService() {
         if (!ok) try { switchToNextInputMethod(false) } catch (_: Exception) {}
     }
 
-    // ---- recording ----
+    // ---- speech recognition (continuous until ■) ----
 
-    private fun startRecording() {
-        try {
-            val f = File(cacheDir, "rec.aac")
-            if (f.exists()) f.delete()
-            val r = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
-            r.setAudioSource(MediaRecorder.AudioSource.MIC)
-            r.setOutputFormat(MediaRecorder.OutputFormat.AAC_ADTS)
-            r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            r.setAudioChannels(1)
-            r.setAudioSamplingRate(16000)
-            r.setAudioEncodingBitRate(32000)
-            r.setMaxDuration(5 * 60 * 1000)
-            r.setOutputFile(f.absolutePath)
-            r.setOnInfoListener { _, what, _ ->
-                if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) main.post { finishAndSend() }
+    private fun transcript(): String {
+        val p = partial.trim()
+        val c = committed.toString().trim()
+        return if (p.isEmpty()) c else if (c.isEmpty()) p else "$c $p"
+    }
+
+    private fun recIntent() = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+    }
+
+    private fun destroyRecognizer() {
+        val r = recognizer ?: return
+        recognizer = null
+        try { r.cancel() } catch (_: Exception) {}
+        try { r.destroy() } catch (_: Exception) {}
+    }
+
+    private fun startListening() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            status.text = "音声認識サービスがありません（Googleアプリを入れて既定の音声認識に設定してください）"
+            return
+        }
+        committed.setLength(0)
+        partial = ""
+        stopRequested = false
+        listenStart = SystemClock.elapsedRealtime()
+        transcriptView.text = ""
+        state = State.LISTENING
+        render()
+        listenOnce()
+    }
+
+    private fun listenOnce() {
+        destroyRecognizer()
+        val r = SpeechRecognizer.createSpeechRecognizer(this)
+        recognizer = r
+        r.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+
+            override fun onPartialResults(partialResults: Bundle?) {
+                if (state != State.LISTENING) return
+                val list = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                partial = list?.firstOrNull() ?: partial
+                transcriptView.text = transcript()
             }
-            r.prepare()
-            r.start()
-            recorder = r
-            audioFile = f
-            recStart = SystemClock.elapsedRealtime()
-            state = State.RECORDING
-            render()
-            main.post(tick)
+
+            override fun onResults(results: Bundle?) {
+                if (state != State.LISTENING) return
+                val best = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                partial = ""
+                if (best.isNotBlank()) {
+                    if (committed.isNotEmpty()) committed.append(" ")
+                    committed.append(best.trim())
+                }
+                transcriptView.text = transcript()
+                if (stopRequested) finishListening() else main.post { if (state == State.LISTENING) listenOnce() }
+            }
+
+            override fun onError(error: Int) {
+                if (state != State.LISTENING) return
+                if (stopRequested) { finishListening(); return }
+                when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                        // silence: keep listening until the user taps ■ (max 3 min)
+                        if (SystemClock.elapsedRealtime() - listenStart < 180000) {
+                            main.postDelayed({ if (state == State.LISTENING && !stopRequested) listenOnce() }, 150)
+                        } else finishListening()
+                    }
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> {
+                        main.postDelayed({ if (state == State.LISTENING && !stopRequested) listenOnce() }, 400)
+                    }
+                    else -> {
+                        if (transcript().isNotBlank()) finishListening()
+                        else {
+                            destroyRecognizer()
+                            state = State.IDLE
+                            render()
+                            status.text = "音声認識エラー($error)。もう一度どうぞ"
+                        }
+                    }
+                }
+            }
+        })
+        try {
+            r.startListening(recIntent())
         } catch (e: Exception) {
-            stopRecorder()
             state = State.IDLE
             render()
-            status.text = "録音を開始できません: ${e.message}"
+            status.text = "音声認識を開始できません: ${e.message}"
         }
     }
 
-    private fun stopRecorder(): Boolean {
-        val r = recorder ?: return false
-        recorder = null
-        return try { r.stop(); true } catch (e: Exception) { false } finally { r.release() }
+    private fun requestStop() {
+        if (state != State.LISTENING) return
+        stopRequested = true
+        status.text = "確定中…"
+        try { recognizer?.stopListening() } catch (_: Exception) {}
+        // safety: if the recognizer never calls back, proceed with what we have
+        val myJob = jobId
+        main.postDelayed({ if (state == State.LISTENING && jobId == myJob) finishListening() }, 2500)
+    }
+
+    private fun finishListening() {
+        if (state != State.LISTENING) return
+        val text = transcript()
+        destroyRecognizer()
+        if (text.isBlank()) {
+            state = State.IDLE
+            render()
+            status.text = "聞き取れませんでした。もう一度どうぞ"
+            return
+        }
+        transcriptView.text = text
+        startRewrite(text)
     }
 
     private fun cancel() {
         jobId++
-        main.removeCallbacks(tick)
-        stopRecorder()
-        audioFile?.delete()
+        destroyRecognizer()
+        main.removeCallbacks(procTick)
         state = State.IDLE
         if (::status.isInitialized) render()
     }
 
-    // ---- send ----
+    /** Insert the raw transcript without AI (works while listening or processing). */
+    private fun insertRawNow() {
+        val text = transcript().ifBlank { transcriptView.text?.toString().orEmpty() }
+        if (text.isBlank()) return
+        jobId++
+        destroyRecognizer()
+        main.removeCallbacks(procTick)
+        insert(text, "", replace = false)
+    }
+
+    // ---- rewrite ----
 
     private fun currentFieldText(): String {
         val ic = currentInputConnection ?: return ""
@@ -262,45 +361,6 @@ class RewriteIME : InputMethodService() {
         val before = ic.getTextBeforeCursor(5000, 0) ?: ""
         val after = ic.getTextAfterCursor(5000, 0) ?: ""
         return before.toString() + after.toString()
-    }
-
-    private fun finishAndSend() {
-        if (state != State.RECORDING) return
-        main.removeCallbacks(tick)
-        val elapsed = SystemClock.elapsedRealtime() - recStart
-        val ok = stopRecorder()
-        val f = audioFile
-        if (!ok || f == null || !f.exists() || f.length() < 800 || elapsed < 700) {
-            state = State.IDLE
-            render()
-            status.text = "音声が短すぎます。もう一度どうぞ"
-            return
-        }
-
-        val field = currentFieldText()
-        val svc = if (prefs.useScreen) ScreenTextService.instance else null
-        val screen = try { svc?.captureText() } catch (e: Exception) { null }
-        val pkg = currentInputEditorInfo?.packageName ?: ""
-
-        val ctx = buildString {
-            if (pkg.isNotEmpty()) append("【アプリ】$pkg\n\n")
-            if (!screen.isNullOrBlank()) append("【画面の会話】\n").append(screen).append("\n\n")
-            if (field.isNotBlank()) append("【入力欄の既存テキスト】\n").append(field.take(4000)).append("\n")
-        }
-        val screenLen = screen?.length ?: 0
-        val needShot = svc != null && (prefs.alwaysShot || screenLen < 40)
-
-        state = State.PROCESSING
-        render()
-        val myJob = ++jobId
-        if (needShot) {
-            status.text = "画面を撮影中…"
-            svc!!.takeShot { img ->
-                if (myJob == jobId) send(myJob, f, ctx, field, img, screenLen)
-            }
-        } else {
-            send(myJob, f, ctx, field, null, screenLen)
-        }
     }
 
     private var procStart = 0L
@@ -315,27 +375,48 @@ class RewriteIME : InputMethodService() {
         }
     }
 
-    private fun send(myJob: Int, f: File, ctx: String, field: String, img: ByteArray?, screenLen: Int) {
+    private fun startRewrite(spoken: String) {
+        val field = currentFieldText()
+        val svc = if (prefs.useScreen) ScreenTextService.instance else null
+        val screen = try { svc?.captureText(2500) } catch (e: Exception) { null }
+        val pkg = currentInputEditorInfo?.packageName ?: ""
+        val ctx = buildString {
+            if (pkg.isNotEmpty()) append("【アプリ】$pkg\n\n")
+            if (!screen.isNullOrBlank()) append("【画面の会話（参考）】\n").append(screen).append("\n\n")
+            if (field.isNotBlank()) append("【入力欄の既存テキスト】\n").append(field.take(3000)).append("\n\n")
+            append("【ユーザーの発話（音声認識結果）】\n").append(spoken)
+        }
+        state = State.PROCESSING
+        render()
+        val myJob = ++jobId
+        if (svc != null && prefs.alwaysShot) {
+            status.text = "画面を撮影中…"
+            svc.takeShot { img -> if (myJob == jobId) send(myJob, ctx, field, spoken, img) }
+        } else {
+            send(myJob, ctx, field, spoken, null)
+        }
+    }
+
+    private fun send(myJob: Int, ctx: String, field: String, spoken: String, img: ByteArray?) {
         val apiKey = prefs.apiKey
         val model = prefs.model
         val extra = prefs.extraRule
         procStart = SystemClock.elapsedRealtime()
         procModel = model
         main.post(procTick)
-        val diag = "画面文字:${screenLen} / スクショ:${if (img != null) "あり" else "なし"} / 入力欄:${field.length}"
-        // watchdog: never stay in "作成中" forever
         main.postDelayed({
             if (myJob == jobId && state == State.PROCESSING) {
                 jobId++
-                state = State.IDLE
-                render()
-                status.text = "タイムアウト（90秒）。⚙設定の「接続テスト」で原因を確認できます"
-                prefs.lastError = "タイムアウト（90秒） model=$procModel"
+                main.removeCallbacks(procTick)
+                prefs.lastError = "タイムアウト（45秒） model=$procModel"
+                // fall back to the raw transcript so the user is never left with nothing
+                insert(spoken, field, replace = false)
+                status.text = "AIが混雑のため、文字起こしをそのまま入力しました"
             }
-        }, 90000)
+        }, 45000)
         Thread {
             val result = try {
-                Result.success(Gemini.generate(apiKey, model, f.readBytes(), "audio/aac", img, ctx, extra,
+                Result.success(Gemini.generate(apiKey, model, null, "", img, ctx, extra,
                     onTry = { m -> main.post { procModel = m } }))
             } catch (e: Throwable) {
                 Result.failure(e)
@@ -343,24 +424,22 @@ class RewriteIME : InputMethodService() {
             main.post {
                 if (myJob != jobId) return@post
                 main.removeCallbacks(procTick)
-                f.delete()
+                val secs = (SystemClock.elapsedRealtime() - procStart) / 1000
                 result.onSuccess {
                     prefs.lastError = ""
-                    insert(it, field)
-                    lastResult.text = diag + "\n" + it.replace("\n", " ").take(60)
+                    insert(it, field, replace = true)
+                    status.text = "✓ 入力しました（AI ${secs}秒）"
                 }
                 result.onFailure {
-                    state = State.IDLE
-                    render()
-                    status.text = "失敗: ${it.message}"
-                    lastResult.text = diag
                     prefs.lastError = it.message ?: it.javaClass.simpleName
+                    insert(spoken, field, replace = false)
+                    status.text = "AI失敗のため文字起こしを入力: ${it.message}"
                 }
             }
         }.start()
     }
 
-    private fun insert(text: String, oldField: String) {
+    private fun insert(text: String, oldField: String, replace: Boolean) {
         val ic = currentInputConnection
         if (ic == null) {
             state = State.IDLE
@@ -369,7 +448,7 @@ class RewriteIME : InputMethodService() {
             return
         }
         ic.beginBatchEdit()
-        if (prefs.replaceField && oldField.isNotEmpty()) {
+        if (replace && prefs.replaceField && oldField.isNotEmpty()) {
             val cur = currentFieldText()
             ic.setSelection(0, cur.length)
         }
@@ -380,7 +459,7 @@ class RewriteIME : InputMethodService() {
         render()
         status.text = "✓ 入力しました"
         if (prefs.autoReturn) {
-            main.postDelayed({ if (state == State.IDLE) goBack() }, 700)
+            main.postDelayed({ if (state == State.IDLE) goBack() }, 900)
         }
     }
 }
