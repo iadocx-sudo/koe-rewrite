@@ -40,6 +40,7 @@ class RewriteIME : InputMethodService() {
     private var partial = ""
     private var stopRequested = false
     private var listenStart = 0L
+    private var earlyRetries = 0
 
     private lateinit var status: TextView
     private lateinit var micBtn: TextView
@@ -139,7 +140,9 @@ class RewriteIME : InputMethodService() {
         shotBtn.text = shotLabel()
         render()
         if (!restarting && state == State.IDLE && prefs.autoStart && ready()) {
-            startListening()
+            // give the mic / recognizer a moment after the keyboard switch
+            status.text = "準備中…"
+            main.postDelayed({ if (state == State.IDLE && isInputViewShown) startListening() }, 450)
         }
     }
 
@@ -238,6 +241,7 @@ class RewriteIME : InputMethodService() {
         committed.setLength(0)
         partial = ""
         stopRequested = false
+        earlyRetries = 0
         listenStart = SystemClock.elapsedRealtime()
         transcriptView.text = ""
         state = State.LISTENING
@@ -279,6 +283,14 @@ class RewriteIME : InputMethodService() {
             override fun onError(error: Int) {
                 if (state != State.LISTENING) return
                 if (stopRequested) { finishListening(); return }
+                // errors right after start are usually the recognizer not being ready yet: retry silently
+                if (transcript().isBlank() && earlyRetries < 3 &&
+                    error != SpeechRecognizer.ERROR_NO_MATCH && error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT &&
+                    error != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                    earlyRetries++
+                    main.postDelayed({ if (state == State.LISTENING && !stopRequested) listenOnce() }, 500L * earlyRetries)
+                    return
+                }
                 when (error) {
                     SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
                         // silence: keep listening until the user taps ■ (max 3 min)
