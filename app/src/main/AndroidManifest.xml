@@ -29,10 +29,10 @@
         <activity
             android:name=".ProcessTextActivity"
             android:exported="true"
-            android:label="AIリライト"
+            android:label="✨AIリライト"
             android:excludeFromRecents="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar">
-            <intent-filter>
+            <intent-filter android:priority="999">
                 <action android:name="android.intent.action.PROCESS_TEXT" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
