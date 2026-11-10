@@ -109,6 +109,30 @@ class SettingsActivity : Activity() {
         })
         col.addView(note("Xiaomi/Redmi等：アプリ情報で「自動起動」をON、バッテリーを「制限なし」にすると読み取りが止まりにくくなります。"))
 
+        // 4.5 keep alive
+        col.addView(head("④-2 ✨ボタンを常に出すための設定（重要）"))
+        col.addView(note("スマホが裏でこのアプリを止めると、キーボードを開いても✨ボタンが出なくなります。下の3つを設定してください。"))
+        col.addView(btn("1. バッテリー制限を解除") {
+            try {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            } catch (e: Exception) {
+                try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Exception) {}
+            }
+        })
+        col.addView(btn("2. 自動起動を許可（Xiaomi）") {
+            try {
+                startActivity(Intent().setComponent(ComponentName("com.miui.securitycenter",
+                    "com.miui.permcenter.autostart.AutoStartManagementActivity")))
+            } catch (e: Exception) {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+            }
+        })
+        col.addView(btn("3. 通知を許可（待機中の表示）") {
+            if (android.os.Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
+            else toast("この端末では不要です")
+        })
+        col.addView(note("さらに確実にするには：アプリ履歴（■ボタン）でこえリライトを長押し →🔒ロック。\n止まってしまった時は、このアプリを開くか、通知パネルのクイック設定に「こえリライト起動」タイルを追加してタップすると復帰します。"))
+
         // 5 options
         col.addView(head("⑤ 動作"))
         col.addView(check("キーボードを開いたら自動で録音開始", prefs.autoStart) { prefs.autoStart = it })
@@ -173,11 +197,15 @@ class SettingsActivity : Activity() {
         val imeOn = imm.enabledInputMethodList.any { it.packageName == packageName }
         val mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val a11y = ScreenTextService.instance != null
+        val batt = try {
+            getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+        } catch (e: Exception) { false }
         fun mark(b: Boolean) = if (b) "✅" else "⬜"
         statusView.text = "${mark(prefs.apiKey.isNotBlank())} APIキー\n" +
             "${mark(mic)} マイク許可\n" +
             "${mark(imeOn)} キーボード有効\n" +
-            "${mark(a11y)} 画面読み取り（任意）" +
+            "${mark(a11y)} 画面読み取り・✨ボタン稼働中\n" +
+            "${mark(batt)} バッテリー制限なし（常駐に必要）" +
             (if (prefs.lastError.isNotBlank()) "\n\n直近のエラー: ${prefs.lastError}" else "")
     }
 

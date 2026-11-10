@@ -54,9 +54,44 @@ class ScreenTextService : AccessibilityService() {
         instance = this
         prefs = Prefs(this)
         wm = getSystemService(WindowManager::class.java)
+        startKeepAlive()
+        main.removeCallbacks(poller)
+        main.post(poller)
+    }
+
+    /** Checks every second whether a keyboard is showing, so the button never depends on a missed event. */
+    private val poller = object : Runnable {
+        override fun run() {
+            try {
+                val pm = getSystemService(android.os.PowerManager::class.java)
+                if (pm == null || pm.isInteractive) updateBubble()
+            } catch (_: Throwable) {}
+            main.postDelayed(this, 1000)
+        }
+    }
+
+    /** Foreground notification so the system (esp. Xiaomi) is less likely to kill the process. */
+    private fun startKeepAlive() {
+        try {
+            val nm = getSystemService(android.app.NotificationManager::class.java)
+            nm.createNotificationChannel(android.app.NotificationChannel(
+                "keep", "常駐（✨ボタン）", android.app.NotificationManager.IMPORTANCE_MIN))
+            val n = android.app.Notification.Builder(this, "keep")
+                .setSmallIcon(R.drawable.ic_fg)
+                .setContentTitle("こえリライト 待機中")
+                .setContentText("キーボード表示時に✨ボタンを出します")
+                .setOngoing(true)
+                .build()
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(1, n, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(1, n)
+            }
+        } catch (_: Throwable) {}
     }
 
     override fun onDestroy() {
+        main.removeCallbacks(poller)
         hideBubble()
         instance = null
         super.onDestroy()

@@ -3,6 +3,10 @@
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <queries>
         <intent>
@@ -40,6 +44,17 @@
         </activity>
 
         <service
+            android:name=".WakeTile"
+            android:exported="true"
+            android:icon="@drawable/ic_fg"
+            android:label="こえリライト起動"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <service
             android:name=".RewriteIME"
             android:exported="true"
             android:label="@string/ime_name"
@@ -54,12 +69,16 @@
 
         <service
             android:name=".ScreenTextService"
+            android:foregroundServiceType="specialUse"
             android:exported="true"
             android:label="@string/a11y_name"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the on-keyboard rewrite button available" />
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility" />
