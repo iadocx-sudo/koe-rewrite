@@ -182,7 +182,7 @@ class RewriteIME : InputMethodService() {
         }
         val screenOn = ScreenTextService.instance != null && prefs.useScreen
         info.text = "画面読み取り: " + (if (screenOn) "ON" else "OFF") +
-            "　「そのまま」=AIを通さず文字起こしだけ入力"
+            "　最後に「エンター」と言うと送信まで実行"
     }
 
     private fun hasMic() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -239,6 +239,7 @@ class RewriteIME : InputMethodService() {
             return
         }
         Gemini.prewarm(prefs.apiKey)
+        autoSend = false
         committed.setLength(0)
         partial = ""
         stopRequested = false
@@ -335,8 +336,26 @@ class RewriteIME : InputMethodService() {
 
     private fun finishListening() {
         if (state != State.LISTENING) return
-        val text = transcript()
+        var text = transcript()
         destroyRecognizer()
+        // voice command: ending with 「エンター」 = send after input
+        autoSend = false
+        if (prefs.voiceEnter) {
+            val m = ENTER_RE.find(text)
+            if (m != null) {
+                autoSend = true
+                text = text.substring(0, m.range.first).trim()
+                if (text.isBlank()) {
+                    // just 「エンター」: send what is already in the field
+                    state = State.IDLE
+                    render()
+                    status.text = "送信します"
+                    doSend(0)
+                    if (prefs.autoReturn) main.postDelayed({ if (state == State.IDLE) goBack() }, 1300)
+                    return
+                }
+            }
+        }
         if (text.isBlank()) {
             state = State.IDLE
             render()
@@ -475,8 +494,35 @@ class RewriteIME : InputMethodService() {
         state = State.IDLE
         render()
         status.text = "✓ 入力しました"
+        val sending = autoSend
+        if (sending) main.postDelayed({ doSend(0) }, 350)
         if (prefs.autoReturn) {
-            main.postDelayed({ if (state == State.IDLE) goBack() }, 900)
+            main.postDelayed({ if (state == State.IDLE) goBack() }, if (sending) 1500L else 900L)
+        }
+    }
+
+    private var autoSend = false
+    private val ENTER_RE = Regex("[\\s、。,.]*(エンター|えんたー|エンタ|enter)[\\s、。,.!！]*$", RegexOption.IGNORE_CASE)
+
+    /** Press the app's send button (via the accessibility service); fall back to the Enter action. */
+    private fun doSend(attempt: Int) {
+        autoSend = false
+        val clicked = try { ScreenTextService.instance?.clickSend() == true } catch (e: Throwable) { false }
+        if (clicked) return
+        if (attempt == 0 && ScreenTextService.instance != null) {
+            main.postDelayed({ doSend(1) }, 450)
+            return
+        }
+        val ic = currentInputConnection ?: return
+        val ei = currentInputEditorInfo
+        val opts = ei?.imeOptions ?: 0
+        val action = opts and EditorInfo.IME_MASK_ACTION
+        val noEnter = (opts and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0
+        if (!noEnter && (action == EditorInfo.IME_ACTION_SEND || action == EditorInfo.IME_ACTION_GO ||
+                action == EditorInfo.IME_ACTION_SEARCH || action == EditorInfo.IME_ACTION_DONE)) {
+            ic.performEditorAction(action)
+        } else {
+            sendDownUpKeyEvents(android.view.KeyEvent.KEYCODE_ENTER)
         }
     }
 }

@@ -54,6 +54,10 @@ class Prefs(context: Context) {
         get() = sp.getInt("bubbleAbove", -1)
         set(v) = sp.edit().putInt("bubbleAbove", v).apply()
 
+    var voiceEnter: Boolean
+        get() = sp.getBoolean("voiceEnter", true)
+        set(v) = sp.edit().putBoolean("voiceEnter", v).apply()
+
     var alwaysShot: Boolean
         get() = sp.getBoolean("alwaysShot", false)
         set(v) = sp.edit().putBoolean("alwaysShot", v).apply()

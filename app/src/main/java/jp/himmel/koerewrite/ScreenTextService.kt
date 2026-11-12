@@ -410,6 +410,33 @@ class ScreenTextService : AccessibilityService() {
         }
     }
 
+    // ---------------- send button ----------------
+
+    /** Finds the app's send button (label 送信 / Send) and clicks it. */
+    fun clickSend(): Boolean {
+        val root = findAppRoot() ?: return false
+        var best: AccessibilityNodeInfo? = null
+        var bestBottom = -1
+        val rect = Rect()
+        walk(root, 0) { n ->
+            if (!n.isVisibleToUser || n.isEditable) return@walk
+            val label = ((n.contentDescription ?: "").toString() + " " + (n.text ?: "").toString()).trim()
+            if (label.isEmpty() || label.length > 20) return@walk
+            val l = label.lowercase()
+            val ng = listOf("取消", "取り消", "予約", "済", "履歴", "先", "unsend", "cancel", "feedback", "フィードバック")
+            val hit = (l.contains("送信") || l == "send" || l.startsWith("send ") || l.contains("send message")) &&
+                ng.none { l.contains(it) }
+            if (!hit) return@walk
+            var c: AccessibilityNodeInfo? = n
+            var d = 0
+            while (c != null && !c.isClickable && d < 3) { c = c.parent; d++ }
+            if (c == null || !c.isClickable || !c.isEnabled) return@walk
+            c.getBoundsInScreen(rect)
+            if (rect.bottom > bestBottom) { bestBottom = rect.bottom; best = c }
+        }
+        return best?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+    }
+
     // ---------------- screen text ----------------
 
     fun captureText(maxChars: Int = 4000): String? {
