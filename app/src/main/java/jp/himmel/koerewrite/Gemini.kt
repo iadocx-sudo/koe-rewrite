@@ -50,7 +50,141 @@ object Gemini {
             if (!screen.isNullOrBlank()) append("【画面の会話（参考）】\n").append(screen).append("\n\n")
             append("【下書き】\n").append(draft)
         }
-        return generate(apiKey, model, null, "", null, ctx, extraRule, system = REWRITE_PROMPT)
+        return generateFast(apiKey, model, ctx, extraRule, REWRITE_PROMPT)
+    }
+
+    // ------------------------------------------------------------------
+    // Fast path (text only): race several light models, first answer wins.
+    // ------------------------------------------------------------------
+
+    private var store: android.content.SharedPreferences? = null
+    @Volatile private var discovered: List<String> = emptyList()
+    @Volatile var lastWinner: String? = null
+        private set
+    private val dead = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    @Volatile private var lastWarm = 0L
+
+    private val STATIC_FAST = listOf(
+        "gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-latest")
+
+    @Synchronized
+    fun attach(sp: android.content.SharedPreferences) {
+        if (store != null) return
+        store = sp
+        discovered = (sp.getString("fastModels", "") ?: "").split(",").filter { it.isNotBlank() }
+        lastWinner = sp.getString("lastWinner", null)
+        (sp.getString("modes", "") ?: "").split(",").forEach {
+            val kv = it.split("=")
+            if (kv.size == 2) kv[1].toIntOrNull()?.let { m -> modeCache[kv[0]] = m }
+        }
+    }
+
+    private fun persist() {
+        val sp = store ?: return
+        sp.edit()
+            .putString("fastModels", discovered.joinToString(","))
+            .putString("lastWinner", lastWinner)
+            .putString("modes", modeCache.entries.joinToString(",") { "${it.key}=${it.value}" })
+            .apply()
+    }
+
+    fun candidates(preferred: String): List<String> =
+        (listOfNotNull(lastWinner) + discovered.take(2) + listOf(preferred) + STATIC_FAST)
+            .filter { it.isNotBlank() && dead[it] != true }.distinct().take(4)
+
+    /** Opens the connection in advance and learns which light models this key can use. */
+    fun prewarm(apiKey: String) {
+        val now = System.currentTimeMillis()
+        if (apiKey.isBlank() || now - lastWarm < 45000) return
+        lastWarm = now
+        Thread {
+            try {
+                val conn = (URL("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200")
+                    .openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 5000; readTimeout = 6000
+                    setRequestProperty("x-goog-api-key", apiKey)
+                }
+                val code = conn.responseCode
+                val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                    ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                if (code in 200..299) {
+                    val arr = JSONObject(text).optJSONArray("models") ?: JSONArray()
+                    val names = ArrayList<String>()
+                    val bad = listOf("tts", "image", "live", "audio", "native", "embedding", "robotics", "computer")
+                    for (i in 0 until arr.length()) {
+                        val m = arr.getJSONObject(i)
+                        val name = m.optString("name").removePrefix("models/")
+                        val methods = m.optJSONArray("supportedGenerationMethods")?.toString() ?: ""
+                        if (!name.contains("flash-lite")) continue
+                        if (!methods.contains("generateContent")) continue
+                        if (bad.any { name.contains(it) }) continue
+                        names.add(name)
+                    }
+                    val sorted = names.sortedWith(
+                        compareByDescending<String> { it == "gemini-flash-lite-latest" }
+                            .thenBy { it.contains("preview") || it.contains("exp") }
+                            .thenByDescending { it })
+                    if (sorted.isNotEmpty()) {
+                        discovered = sorted.take(3)
+                        persist()
+                    }
+                }
+            } catch (_: Throwable) {}
+        }.start()
+    }
+
+    /**
+     * Text-only generation tuned for speed: starts the best model, adds another every 1.2s,
+     * returns the first success. Gives up at deadlineMs.
+     */
+    fun generateFast(
+        apiKey: String, preferred: String, contextText: String, extraRule: String, system: String,
+        deadlineMs: Long = 10000, onWin: (String) -> Unit = {},
+    ): String {
+        val models = candidates(preferred)
+        val q = java.util.concurrent.LinkedBlockingQueue<Pair<String, Result<String>>>()
+        val done = java.util.concurrent.atomic.AtomicBoolean(false)
+        val start = System.currentTimeMillis()
+        models.forEachIndexed { i, m ->
+            Thread {
+                try {
+                    if (i > 0) Thread.sleep(1200L * i)
+                    if (done.get()) return@Thread
+                    q.put(m to Result.success(callAnyMode(apiKey, m, null, "", null, contextText, extraRule, system, 9000)))
+                } catch (e: Throwable) {
+                    q.put(m to Result.failure(e))
+                }
+            }.start()
+        }
+        var failures = 0
+        var last: Throwable? = null
+        while (true) {
+            val left = deadlineMs - (System.currentTimeMillis() - start)
+            if (left <= 0) break
+            val r = q.poll(left, java.util.concurrent.TimeUnit.MILLISECONDS) ?: break
+            val (m, res) = r
+            if (res.isSuccess) {
+                done.set(true)
+                lastWinner = m
+                persist()
+                onWin(m)
+                return res.getOrThrow()
+            }
+            val e = res.exceptionOrNull()
+            last = e
+            if (e is GeminiException) {
+                if (e.code == 404) dead[m] = true
+                // key problems: no point waiting for the others
+                if (e.code == 401 || e.code == 403 || (e.code == 400 && e.message.orEmpty().contains("API key", true))) {
+                    done.set(true); throw e
+                }
+            }
+            failures++
+            if (failures >= models.size) break
+        }
+        done.set(true)
+        if (failures >= models.size && last != null) throw last
+        throw GeminiException("${deadlineMs / 1000}秒以内に応答がありませんでした（Geminiが混雑中）", -3)
     }
 
     /** Tries the given model, then fallbacks only when the model is not found (404). */
@@ -92,12 +226,13 @@ object Gemini {
     private fun callAnyMode(
         apiKey: String, model: String, audio: ByteArray?, audioMime: String,
         image: ByteArray?, contextText: String, extraRule: String, system: String,
+        readMs: Int = 30000,
     ): String {
         var mode = modeCache[model] ?: 0
         while (true) {
             try {
-                val r = call(apiKey, model, audio, audioMime, image, contextText, extraRule, mode, system)
-                modeCache[model] = mode
+                val r = call(apiKey, model, audio, audioMime, image, contextText, extraRule, mode, system, readMs)
+                if (modeCache[model] != mode) { modeCache[model] = mode; persist() }
                 return r
             } catch (e: GeminiException) {
                 val keyProblem = e.message.orEmpty().contains("API key", true)
@@ -110,9 +245,9 @@ object Gemini {
     /** Text-only connectivity test. Returns "model: reply". */
     fun test(apiKey: String, model: String): String {
         var used = model
-        val out = generate(apiKey, model, null, "", null,
-            "【接続テスト】「OK」とだけ出力してください。", "", onTry = { used = it })
-        return "$used（思考設定${modeCache[used] ?: "-"}）→ $out"
+        val out = generateFast(apiKey, model, "【接続テスト】「OK」とだけ出力してください。", "", SYSTEM_PROMPT,
+            onWin = { used = it })
+        return "$used（思考設定${modeCache[used] ?: "-"}／候補: ${candidates(model).joinToString(" → ")}）→ $out"
     }
 
     private fun call(
@@ -125,6 +260,7 @@ object Gemini {
         extraRule: String,
         thinkingMode: Int,
         system: String,
+        readMs: Int = 30000,
     ): String {
         val sys = if (extraRule.isBlank()) system
         else system + "\n\nユーザー固有の追加ルール:\n" + extraRule.trim()
@@ -168,8 +304,8 @@ object Gemini {
         val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
-            connectTimeout = 15000
-            readTimeout = 30000
+            connectTimeout = minOf(15000, readMs / 2)
+            readTimeout = readMs
             doOutput = true
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
             setRequestProperty("x-goog-api-key", apiKey)

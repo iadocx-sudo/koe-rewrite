@@ -7,6 +7,16 @@ class Prefs(context: Context) {
     private val sp: SharedPreferences =
         context.getSharedPreferences("koe", Context.MODE_PRIVATE)
 
+    init {
+        // v12: the default model moved to the faster "lite" family
+        if (!sp.getBoolean("migV12", false)) {
+            val e = sp.edit().putBoolean("migV12", true)
+            if ((sp.getString("model", "") ?: "") == "gemini-flash-latest") e.putString("model", DEFAULT_MODEL)
+            e.apply()
+        }
+        Gemini.attach(sp)
+    }
+
     var apiKey: String
         get() = sp.getString("apiKey", "") ?: ""
         set(v) = sp.edit().putString("apiKey", v.trim()).apply()
@@ -57,7 +67,7 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putString("extraRule", v).apply()
 
     companion object {
-        const val DEFAULT_MODEL = "gemini-flash-latest"
+        const val DEFAULT_MODEL = "gemini-flash-lite-latest"
         val FALLBACK_MODELS = listOf("gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite")
     }
 }

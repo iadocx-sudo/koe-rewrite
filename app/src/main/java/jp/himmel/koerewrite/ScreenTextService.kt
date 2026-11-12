@@ -135,6 +135,7 @@ class ScreenTextService : AccessibilityService() {
         ime.getBoundsInScreen(r)
         if (r.height() < dp(80)) { hideBubble(); return }
         kbTop = r.top
+        Gemini.prewarm(prefs.apiKey)
         showBubble()
         // keep checking while shown so it reliably follows / hides with the keyboard
         main.removeCallbacks(updater)

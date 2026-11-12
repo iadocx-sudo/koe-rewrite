@@ -238,6 +238,7 @@ class RewriteIME : InputMethodService() {
             status.text = "音声認識サービスがありません（Googleアプリを入れて既定の音声認識に設定してください）"
             return
         }
+        Gemini.prewarm(prefs.apiKey)
         committed.setLength(0)
         partial = ""
         stopRequested = false
@@ -381,7 +382,7 @@ class RewriteIME : InputMethodService() {
         override fun run() {
             if (state == State.PROCESSING) {
                 val s = (SystemClock.elapsedRealtime() - procStart) / 1000
-                status.text = "AIが文章を作成中… ${s}秒（$procModel）"
+                status.text = "AIが文章を作成中… ${s}秒"
                 main.postDelayed(this, 1000)
             }
         }
@@ -420,16 +421,20 @@ class RewriteIME : InputMethodService() {
             if (myJob == jobId && state == State.PROCESSING) {
                 jobId++
                 main.removeCallbacks(procTick)
-                prefs.lastError = "タイムアウト（45秒） model=$procModel"
+                prefs.lastError = "タイムアウト（12秒） model=$procModel"
                 // fall back to the raw transcript so the user is never left with nothing
                 insert(spoken, field, replace = false)
                 status.text = "AIが混雑のため、文字起こしをそのまま入力しました"
             }
-        }, 45000)
+        }, if (img == null) 12000L else 45000L)
         Thread {
             val result = try {
-                Result.success(Gemini.generate(apiKey, model, null, "", img, ctx, extra,
-                    onTry = { m -> main.post { procModel = m } }))
+                if (img == null)
+                    Result.success(Gemini.generateFast(apiKey, model, ctx, extra, Gemini.SYSTEM_PROMPT,
+                        onWin = { m -> main.post { procModel = m } }))
+                else
+                    Result.success(Gemini.generate(apiKey, model, null, "", img, ctx, extra,
+                        onTry = { m -> main.post { procModel = m } }))
             } catch (e: Throwable) {
                 Result.failure(e)
             }
@@ -440,7 +445,7 @@ class RewriteIME : InputMethodService() {
                 result.onSuccess {
                     prefs.lastError = ""
                     insert(it, field, replace = false)
-                    status.text = "✓ 入力しました（AI ${secs}秒）"
+                    status.text = "✓ 入力しました（AI ${secs}秒・$procModel）"
                 }
                 result.onFailure {
                     prefs.lastError = it.message ?: it.javaClass.simpleName
