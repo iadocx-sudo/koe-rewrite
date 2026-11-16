@@ -139,12 +139,11 @@ class SettingsActivity : Activity() {
         col.addView(check("入力後、自動でGboardに戻る", prefs.autoReturn) { prefs.autoReturn = it })
         col.addView(check("画面の会話を文脈に使う", prefs.useScreen) { prefs.useScreen = it })
         col.addView(check("音声入力の最後に「エンター」と言うと送信まで行う", prefs.voiceEnter) { prefs.voiceEnter = it })
-        col.addView(check("キーボード表示中に✨ボタンを出す（タップ=AIリライト／長押し=音声入力）④が必要", prefs.floatButton) {
+        col.addView(check("キーボード表示中にボタンを出す（タップ=音声入力／長押し=AIリライト）④が必要", prefs.floatButton) {
             prefs.floatButton = it
             ScreenTextService.instance?.refreshBubble()
         })
         col.addView(note("浮遊ボタンはドラッグで好きな位置に動かせます（位置は記憶）。"))
-        col.addView(check("スクリーンショットも送る（通常はOFF推奨。遅くなります）", prefs.alwaysShot) { prefs.alwaysShot = it })
 
         col.addView(head("追加ルール（任意）"))
         ruleEdit = EditText(this).apply {

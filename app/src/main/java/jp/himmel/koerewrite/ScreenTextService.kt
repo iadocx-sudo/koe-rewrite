@@ -181,14 +181,14 @@ class ScreenTextService : AccessibilityService() {
             }
         }
         val rw = TextView(this).apply {
-            text = "✨"
+            text = "🎤"
             textSize = 26f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
         }
         val div = View(this).apply { setBackgroundColor(Color.parseColor("#CCFFFFFF")) }
         val hint = TextView(this).apply {
-            text = "長押し🎤"
+            text = "長押し✨"
             textSize = 10f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
@@ -205,7 +205,7 @@ class ScreenTextService : AccessibilityService() {
                 longFired = true
                 box.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
                 box.alpha = 1f
-                switchToVoice()
+                onBubbleTap()
             }
         }
         box.setOnTouchListener { _, e ->
@@ -239,7 +239,7 @@ class ScreenTextService : AccessibilityService() {
                         val screenW = resources.displayMetrics.widthPixels
                         prefs.bubbleRight = (screenW - lp.x - bubbleW()).coerceAtLeast(0)
                         prefs.bubbleAbove = (kbTop - lp.y - bubbleH()).coerceAtLeast(0)
-                    } else onBubbleTap()
+                    } else switchToVoice()
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> { main.removeCallbacks(longPress); box.alpha = 1f; true }
@@ -310,7 +310,7 @@ class ScreenTextService : AccessibilityService() {
         val node = focusedEditable()
         val text = node?.let { fieldText(it) }.orEmpty()
         if (node == null || text.isBlank()) {
-            toast("入力欄に文章を書いてから✨をタップ（長押しで音声入力）")
+            toast("入力欄に文章がある状態で長押しするとAIリライトします")
             return
         }
         // undo within 15s
@@ -336,7 +336,7 @@ class ScreenTextService : AccessibilityService() {
             } catch (e: Throwable) { Result.failure(e) }
             main.post {
                 busy = false
-                setBubbleLook("✨", "#FA8072")
+                setBubbleLook("🎤", "#FA8072")
                 result.onSuccess { out ->
                     val target = focusedEditable() ?: node
                     if (setFieldText(target, out)) {
@@ -344,7 +344,7 @@ class ScreenTextService : AccessibilityService() {
                         undoRewritten = out
                         undoUntil = System.currentTimeMillis() + 15000
                         prefs.lastError = ""
-                        toast("リライトしました（${(System.currentTimeMillis() - t0) / 1000}秒）。15秒以内にもう一度タップで元に戻す")
+                        toast("リライトしました（${(System.currentTimeMillis() - t0) / 1000}秒）。15秒以内にもう一度長押しで元に戻す")
                     } else {
                         val cm = getSystemService(android.content.ClipboardManager::class.java)
                         cm?.setPrimaryClip(android.content.ClipData.newPlainText("rewrite", out))

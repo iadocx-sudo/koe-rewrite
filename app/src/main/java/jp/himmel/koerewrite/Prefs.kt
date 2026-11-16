@@ -58,6 +58,10 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("voiceEnter", true)
         set(v) = sp.edit().putBoolean("voiceEnter", v).apply()
 
+    var aiPolish: Boolean
+        get() = sp.getBoolean("aiPolish", true)
+        set(v) = sp.edit().putBoolean("aiPolish", v).apply()
+
     var alwaysShot: Boolean
         get() = sp.getBoolean("alwaysShot", false)
         set(v) = sp.edit().putBoolean("alwaysShot", v).apply()

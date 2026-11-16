@@ -48,7 +48,7 @@ class RewriteIME : InputMethodService() {
     private lateinit var transcriptView: TextView
     private lateinit var shotBtn: TextView
 
-    private fun shotLabel() = if (prefs.alwaysShot) "📷 ON" else "📷 OFF"
+    private fun shotLabel() = if (prefs.aiPolish) "AI清書ON" else "AI清書OFF"
 
     override fun onCreate() {
         super.onCreate()
@@ -113,9 +113,8 @@ class RewriteIME : InputMethodService() {
         val lp = LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(4), dp(6), dp(4), 0) }
         row.addView(pill("⌨戻る") { cancel(); goBack() }, lp)
         row.addView(pill("✕取消") { cancel() }, LinearLayout.LayoutParams(lp))
-        row.addView(pill("そのまま") { insertRawNow() }, LinearLayout.LayoutParams(lp))
         shotBtn = pill(shotLabel()) {
-            prefs.alwaysShot = !prefs.alwaysShot
+            prefs.aiPolish = !prefs.aiPolish
             shotBtn.text = shotLabel()
         }
         row.addView(shotBtn, LinearLayout.LayoutParams(lp))
@@ -147,7 +146,7 @@ class RewriteIME : InputMethodService() {
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
-        if (state == State.LISTENING) cancel()
+        if (state != State.IDLE) cancel()
         super.onFinishInputView(finishingInput)
     }
 
@@ -175,14 +174,12 @@ class RewriteIME : InputMethodService() {
             State.IDLE -> status.text = when {
                 prefs.apiKey.isBlank() -> "⚙ 設定でGemini APIキーを登録してください"
                 !hasMic() -> "⚙ 設定でマイクを許可してください"
-                else -> "🎤をタップして話す（例：「うまい返信にして、〇〇って伝えたい」）"
+                else -> "🎤をタップして話す（間が空いても■を押すまで続きます）"
             }
-            State.LISTENING -> status.text = "● 聞き取り中…　話し終えたら■をタップ"
+            State.LISTENING -> status.text = "● 聞き取り中（間が空いても続きます）　終わったら■"
             State.PROCESSING -> {}
         }
-        val screenOn = ScreenTextService.instance != null && prefs.useScreen
-        info.text = "画面読み取り: " + (if (screenOn) "ON" else "OFF") +
-            "　最後に「エンター」と言うと送信まで実行"
+        info.text = "話した言葉はすぐ入力 → 数秒後にAIが清書　／　最後に「エンター」で送信"
     }
 
     private fun hasMic() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -208,13 +205,14 @@ class RewriteIME : InputMethodService() {
         if (!ok) try { switchToNextInputMethod(false) } catch (_: Exception) {}
     }
 
-    // ---- speech recognition (continuous until ■) ----
+    // ---- continuous dictation: listens until ■, inserts each phrase at once, polishes it in the background ----
 
-    private fun transcript(): String {
-        val p = partial.trim()
-        val c = committed.toString().trim()
-        return if (p.isEmpty()) c else if (c.isEmpty()) p else "$c $p"
-    }
+    private val rawQueue = ArrayList<String>()
+    private var busy = false
+    private var sessionCtx = ""
+    private var sessionId = 0
+    private var errStreak = 0
+    private var lastSpeech = 0L
 
     private fun recIntent() = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -222,8 +220,6 @@ class RewriteIME : InputMethodService() {
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
     }
 
     private fun destroyRecognizer() {
@@ -240,15 +236,24 @@ class RewriteIME : InputMethodService() {
         }
         Gemini.prewarm(prefs.apiKey)
         autoSend = false
-        committed.setLength(0)
         partial = ""
         stopRequested = false
-        earlyRetries = 0
-        listenStart = SystemClock.elapsedRealtime()
+        errStreak = 0
+        rawQueue.clear()
+        sessionId++
+        lastSpeech = SystemClock.elapsedRealtime()
+        // screen context is captured once per session
+        val screen = if (prefs.useScreen) try { ScreenTextService.instance?.captureText(2000) } catch (e: Exception) { null } else null
+        sessionCtx = if (screen.isNullOrBlank()) "" else "【画面の会話（参考）】\n$screen\n\n"
         transcriptView.text = ""
         state = State.LISTENING
         render()
         listenOnce()
+    }
+
+    private fun relisten(delay: Long) {
+        val sid = sessionId
+        main.postDelayed({ if (state == State.LISTENING && !stopRequested && sid == sessionId) listenOnce() }, delay)
     }
 
     private fun listenOnce() {
@@ -264,64 +269,129 @@ class RewriteIME : InputMethodService() {
             override fun onEvent(eventType: Int, params: Bundle?) {}
 
             override fun onPartialResults(partialResults: Bundle?) {
-                if (state != State.LISTENING) return
-                val list = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                partial = list?.firstOrNull() ?: partial
-                transcriptView.text = transcript()
+                if (state != State.LISTENING || recognizer !== r) return
+                val p = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                if (p.isNotBlank()) {
+                    partial = p
+                    lastSpeech = SystemClock.elapsedRealtime()
+                    errStreak = 0
+                    transcriptView.text = p
+                }
             }
 
             override fun onResults(results: Bundle?) {
-                if (state != State.LISTENING) return
+                if (state != State.LISTENING || recognizer !== r) return
                 val best = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
                 partial = ""
+                transcriptView.text = ""
+                errStreak = 0
                 if (best.isNotBlank()) {
-                    if (committed.isNotEmpty()) committed.append(" ")
-                    committed.append(best.trim())
+                    lastSpeech = SystemClock.elapsedRealtime()
+                    handleSegment(best)
                 }
-                transcriptView.text = transcript()
-                if (stopRequested) finishListening() else main.post { if (state == State.LISTENING) listenOnce() }
+                if (stopRequested) afterStop() else relisten(0)
             }
 
             override fun onError(error: Int) {
-                if (state != State.LISTENING) return
-                if (stopRequested) { finishListening(); return }
-                // errors right after start are usually the recognizer not being ready yet: retry silently
-                if (transcript().isBlank() && earlyRetries < 3 &&
-                    error != SpeechRecognizer.ERROR_NO_MATCH && error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT &&
-                    error != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
-                    earlyRetries++
-                    main.postDelayed({ if (state == State.LISTENING && !stopRequested) listenOnce() }, 500L * earlyRetries)
+                if (state != State.LISTENING || recognizer !== r) return
+                if (stopRequested) { flushPartial(); afterStop(); return }
+                if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                    stopWithMessage("マイクの許可がありません（⚙設定で許可してください）")
                     return
                 }
-                when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                        // silence: keep listening until the user taps ■ (max 3 min)
-                        if (SystemClock.elapsedRealtime() - listenStart < 180000) {
-                            main.postDelayed({ if (state == State.LISTENING && !stopRequested) listenOnce() }, 150)
-                        } else finishListening()
-                    }
-                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> {
-                        main.postDelayed({ if (state == State.LISTENING && !stopRequested) listenOnce() }, 400)
-                    }
-                    else -> {
-                        if (transcript().isNotBlank()) finishListening()
-                        else {
-                            destroyRecognizer()
-                            state = State.IDLE
-                            render()
-                            status.text = "音声認識エラー($error)。もう一度どうぞ"
-                        }
-                    }
+                val silence = error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+                // a phrase that was heard but not finalized must not be lost
+                flushPartial()
+                if (!silence) errStreak++
+                val idle = SystemClock.elapsedRealtime() - lastSpeech
+                when {
+                    errStreak > 8 -> stopWithMessage("音声認識エラー($error)が続いたため停止しました")
+                    idle > 90000 -> { stopRequested = true; afterStop() }   // 90s without speech
+                    else -> relisten(if (silence) 100L else minOf(1500L, 300L * errStreak))
                 }
             }
         })
         try {
             r.startListening(recIntent())
         } catch (e: Exception) {
-            state = State.IDLE
-            render()
-            status.text = "音声認識を開始できません: ${e.message}"
+            errStreak++
+            if (errStreak > 8) stopWithMessage("音声認識を開始できません: ${e.message}") else relisten(500)
         }
+    }
+
+    private fun flushPartial() {
+        val p = partial.trim()
+        partial = ""
+        transcriptView.text = ""
+        if (p.isNotEmpty()) handleSegment(p)
+    }
+
+    /** One recognized phrase: insert it immediately, then polish it in the background. */
+    private fun handleSegment(text: String) {
+        var t = text.trim()
+        if (prefs.voiceEnter) {
+            val m = ENTER_RE.find(t)
+            if (m != null) {
+                autoSend = true
+                stopRequested = true
+                t = t.substring(0, m.range.first).trim()
+            }
+        }
+        if (t.isEmpty()) return
+        val ic = currentInputConnection ?: return
+        ic.commitText(t, 1)
+        if (prefs.aiPolish && prefs.apiKey.isNotBlank()) {
+            rawQueue.add(t)
+            pump()
+        }
+    }
+
+    /** Sends everything waiting as one request (phrases spoken while a request was running are merged). */
+    private fun pump() {
+        if (busy || rawQueue.isEmpty()) return
+        val raw = rawQueue.joinToString("")
+        rawQueue.clear()
+        busy = true
+        val sid = sessionId
+        val before = currentInputConnection?.getTextBeforeCursor(3000, 0)?.toString() ?: ""
+        val idx = before.lastIndexOf(raw)
+        val existing = if (idx > 0) before.substring(0, idx) else ""
+        val ctx = buildString {
+            append(sessionCtx)
+            if (existing.isNotBlank()) append("【直前までの文章】\n").append(existing.takeLast(1500)).append("\n\n")
+            append("【今回の発話】\n").append(raw)
+        }
+        val apiKey = prefs.apiKey
+        val model = prefs.model
+        val extra = prefs.extraRule
+        Thread {
+            val result = try {
+                Result.success(Gemini.generateFast(apiKey, model, ctx, extra, Gemini.DICTATION_PROMPT, deadlineMs = 8000))
+            } catch (e: Throwable) { Result.failure(e) }
+            main.post {
+                busy = false
+                if (sid == sessionId) {
+                    result.onSuccess { prefs.lastError = ""; replaceRaw(raw, it) }
+                    result.onFailure { prefs.lastError = it.message ?: it.javaClass.simpleName }
+                    pump()
+                    maybeFinish()
+                }
+            }
+        }.start()
+    }
+
+    /** Swap the raw phrase for the polished one, keeping anything typed/spoken after it. */
+    private fun replaceRaw(raw: String, out: String) {
+        if (out == raw || out.isBlank()) return
+        val ic = currentInputConnection ?: return
+        val before = ic.getTextBeforeCursor(4000, 0)?.toString() ?: return
+        val idx = before.lastIndexOf(raw)
+        if (idx < 0) return
+        val tail = before.substring(idx + raw.length)
+        ic.beginBatchEdit()
+        ic.deleteSurroundingText(raw.length + tail.length, 0)
+        ic.commitText(out + tail, 1)
+        ic.endBatchEdit()
     }
 
     private fun requestStop() {
@@ -329,62 +399,51 @@ class RewriteIME : InputMethodService() {
         stopRequested = true
         status.text = "確定中…"
         try { recognizer?.stopListening() } catch (_: Exception) {}
-        // safety: if the recognizer never calls back, proceed with what we have
-        val myJob = jobId
-        main.postDelayed({ if (state == State.LISTENING && jobId == myJob) finishListening() }, 2500)
+        // safety: if the recognizer never calls back, finish with what was heard
+        val sid = sessionId
+        main.postDelayed({
+            if (state == State.LISTENING && sid == sessionId) { flushPartial(); afterStop() }
+        }, 1800)
     }
 
-    private fun finishListening() {
+    private fun afterStop() {
         if (state != State.LISTENING) return
-        var text = transcript()
         destroyRecognizer()
-        // voice command: ending with 「エンター」 = send after input
-        autoSend = false
-        if (prefs.voiceEnter) {
-            val m = ENTER_RE.find(text)
-            if (m != null) {
-                autoSend = true
-                text = text.substring(0, m.range.first).trim()
-                if (text.isBlank()) {
-                    // just 「エンター」: send what is already in the field
-                    state = State.IDLE
-                    render()
-                    status.text = "送信します"
-                    doSend(0)
-                    if (prefs.autoReturn) main.postDelayed({ if (state == State.IDLE) goBack() }, 1300)
-                    return
-                }
-            }
+        state = State.PROCESSING
+        render()
+        status.text = "仕上げ中…"
+        maybeFinish()
+    }
+
+    private fun maybeFinish() {
+        if (state != State.PROCESSING || busy || rawQueue.isNotEmpty()) return
+        state = State.IDLE
+        render()
+        status.text = "✓ 完了"
+        val sending = autoSend
+        if (sending) main.postDelayed({ doSend(0) }, 300)
+        if (prefs.autoReturn) {
+            main.postDelayed({ if (state == State.IDLE) goBack() }, if (sending) 1500L else 400L)
         }
-        if (text.isBlank()) {
-            state = State.IDLE
-            render()
-            status.text = "聞き取れませんでした。もう一度どうぞ"
-            return
-        }
-        transcriptView.text = text
-        startRewrite(text)
+    }
+
+    private fun stopWithMessage(msg: String) {
+        sessionId++
+        destroyRecognizer()
+        rawQueue.clear()
+        state = State.IDLE
+        render()
+        status.text = msg
     }
 
     private fun cancel() {
-        jobId++
+        sessionId++
         destroyRecognizer()
-        main.removeCallbacks(procTick)
+        rawQueue.clear()
+        partial = ""
         state = State.IDLE
-        if (::status.isInitialized) render()
+        if (::status.isInitialized) { render(); transcriptView.text = "" }
     }
-
-    /** Insert the raw transcript without AI (works while listening or processing). */
-    private fun insertRawNow() {
-        val text = transcript().ifBlank { transcriptView.text?.toString().orEmpty() }
-        if (text.isBlank()) return
-        jobId++
-        destroyRecognizer()
-        main.removeCallbacks(procTick)
-        insert(text, "", replace = false)
-    }
-
-    // ---- rewrite ----
 
     private fun currentFieldText(): String {
         val ic = currentInputConnection ?: return ""
@@ -393,112 +452,6 @@ class RewriteIME : InputMethodService() {
         val before = ic.getTextBeforeCursor(5000, 0) ?: ""
         val after = ic.getTextAfterCursor(5000, 0) ?: ""
         return before.toString() + after.toString()
-    }
-
-    private var procStart = 0L
-    private var procModel = ""
-    private val procTick = object : Runnable {
-        override fun run() {
-            if (state == State.PROCESSING) {
-                val s = (SystemClock.elapsedRealtime() - procStart) / 1000
-                status.text = "AIが文章を作成中… ${s}秒"
-                main.postDelayed(this, 1000)
-            }
-        }
-    }
-
-    private fun startRewrite(spoken: String) {
-        val field = currentFieldText()
-        val svc = if (prefs.useScreen) ScreenTextService.instance else null
-        val screen = try { svc?.captureText(2500) } catch (e: Exception) { null }
-        val pkg = currentInputEditorInfo?.packageName ?: ""
-        val ctx = buildString {
-            if (pkg.isNotEmpty()) append("【アプリ】$pkg\n\n")
-            if (!screen.isNullOrBlank()) append("【画面の会話（参考）】\n").append(screen).append("\n\n")
-            if (field.isNotBlank()) append("【入力欄の既存テキスト】\n").append(field.take(3000)).append("\n\n")
-            append("【ユーザーの発話（音声認識結果）】\n").append(spoken)
-        }
-        state = State.PROCESSING
-        render()
-        val myJob = ++jobId
-        if (svc != null && prefs.alwaysShot) {
-            status.text = "画面を撮影中…"
-            svc.takeShot { img -> if (myJob == jobId) send(myJob, ctx, field, spoken, img) }
-        } else {
-            send(myJob, ctx, field, spoken, null)
-        }
-    }
-
-    private fun send(myJob: Int, ctx: String, field: String, spoken: String, img: ByteArray?) {
-        val apiKey = prefs.apiKey
-        val model = prefs.model
-        val extra = prefs.extraRule
-        procStart = SystemClock.elapsedRealtime()
-        procModel = model
-        main.post(procTick)
-        main.postDelayed({
-            if (myJob == jobId && state == State.PROCESSING) {
-                jobId++
-                main.removeCallbacks(procTick)
-                prefs.lastError = "タイムアウト（12秒） model=$procModel"
-                // fall back to the raw transcript so the user is never left with nothing
-                insert(spoken, field, replace = false)
-                status.text = "AIが混雑のため、文字起こしをそのまま入力しました"
-            }
-        }, if (img == null) 12000L else 45000L)
-        Thread {
-            val result = try {
-                if (img == null)
-                    Result.success(Gemini.generateFast(apiKey, model, ctx, extra, Gemini.SYSTEM_PROMPT,
-                        onWin = { m -> main.post { procModel = m } }))
-                else
-                    Result.success(Gemini.generate(apiKey, model, null, "", img, ctx, extra,
-                        onTry = { m -> main.post { procModel = m } }))
-            } catch (e: Throwable) {
-                Result.failure(e)
-            }
-            main.post {
-                if (myJob != jobId) return@post
-                main.removeCallbacks(procTick)
-                val secs = (SystemClock.elapsedRealtime() - procStart) / 1000
-                result.onSuccess {
-                    prefs.lastError = ""
-                    insert(it, field, replace = false)
-                    status.text = "✓ 入力しました（AI ${secs}秒・$procModel）"
-                }
-                result.onFailure {
-                    prefs.lastError = it.message ?: it.javaClass.simpleName
-                    insert(spoken, field, replace = false)
-                    status.text = "AI失敗のため文字起こしを入力: ${it.message}"
-                }
-            }
-        }.start()
-    }
-
-    private fun insert(text: String, oldField: String, replace: Boolean) {
-        val ic = currentInputConnection
-        if (ic == null) {
-            state = State.IDLE
-            render()
-            status.text = "入力欄が見つかりません"
-            return
-        }
-        ic.beginBatchEdit()
-        if (replace && prefs.replaceField && oldField.isNotEmpty()) {
-            val cur = currentFieldText()
-            ic.setSelection(0, cur.length)
-        }
-        ic.commitText(text, 1)
-        ic.endBatchEdit()
-
-        state = State.IDLE
-        render()
-        status.text = "✓ 入力しました"
-        val sending = autoSend
-        if (sending) main.postDelayed({ doSend(0) }, 350)
-        if (prefs.autoReturn) {
-            main.postDelayed({ if (state == State.IDLE) goBack() }, if (sending) 1500L else 900L)
-        }
     }
 
     private var autoSend = false
