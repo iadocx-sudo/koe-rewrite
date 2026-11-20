@@ -45,6 +45,18 @@ class ScreenTextService : AccessibilityService() {
     private lateinit var prefs: Prefs
     private var kbTop = 0
     private val updater = Runnable { updateBubble() }
+    private var nav: ClaudeNavButtons? = null
+
+    /** 単独アプリ「Claudeボタン」が動いていれば、二重表示を避けてこちらは出さない */
+    private fun navAllowed(): Boolean {
+        if (!::prefs.isInitialized || !prefs.claudeNav) return false
+        val on = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+        return !on.contains("jp.himmel.claudebtn/")
+    }
+
+    fun refreshNav() {
+        main.post { nav?.enabled = navAllowed() }
+    }
 
     private fun dp(v: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
@@ -54,6 +66,7 @@ class ScreenTextService : AccessibilityService() {
         instance = this
         prefs = Prefs(this)
         wm = getSystemService(WindowManager::class.java)
+        nav = ClaudeNavButtons(this).also { it.enabled = navAllowed() }
         startKeepAlive()
         main.removeCallbacks(poller)
         main.post(poller)
@@ -65,6 +78,7 @@ class ScreenTextService : AccessibilityService() {
             try {
                 val pm = getSystemService(android.os.PowerManager::class.java)
                 if (pm == null || pm.isInteractive) updateBubble()
+                nav?.let { it.enabled = navAllowed() }
             } catch (_: Throwable) {}
             main.postDelayed(this, 1000)
         }
@@ -93,6 +107,7 @@ class ScreenTextService : AccessibilityService() {
     override fun onDestroy() {
         main.removeCallbacks(poller)
         hideBubble()
+        nav?.hide()
         instance = null
         super.onDestroy()
     }
@@ -100,8 +115,12 @@ class ScreenTextService : AccessibilityService() {
     private val updaterLate1 = Runnable { updateBubble() }
     private val updaterLate2 = Runnable { updateBubble() }
 
+    private val navUpd = Runnable { nav?.update() }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        main.removeCallbacks(navUpd)
+        main.postDelayed(navUpd, 150)
         main.removeCallbacks(updater)
         main.postDelayed(updater, 120)
         main.removeCallbacks(updaterLate1)

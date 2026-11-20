@@ -13,3 +13,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "KoeRewrite"
 include(":app")
+include(":claudebtn")

@@ -54,6 +54,11 @@ class Prefs(context: Context) {
         get() = sp.getInt("bubbleAbove", -1)
         set(v) = sp.edit().putInt("bubbleAbove", v).apply()
 
+    /** Claudeアプリ表示中だけナビバー左右に ☰ / 送信 ボタンを出す */
+    var claudeNav: Boolean
+        get() = sp.getBoolean("claudeNav", true)
+        set(v) = sp.edit().putBoolean("claudeNav", v).apply()
+
     var voiceEnter: Boolean
         get() = sp.getBoolean("voiceEnter", true)
         set(v) = sp.edit().putBoolean("voiceEnter", v).apply()

@@ -20,13 +20,17 @@ jobs:
         with:
           gradle-version: "8.9"
       - name: Build
-        run: gradle :app:assembleRelease --no-daemon --stacktrace
+        run: gradle :app:assembleRelease :claudebtn:assembleRelease --no-daemon --stacktrace
       - name: Rename
-        run: cp app/build/outputs/apk/release/app-release.apk koe-rewrite.apk
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk koe-rewrite.apk
+          cp claudebtn/build/outputs/apk/release/claudebtn-release.apk claude-button.apk
       - uses: actions/upload-artifact@v4
         with:
           name: koe-rewrite
-          path: koe-rewrite.apk
+          path: |
+            koe-rewrite.apk
+            claude-button.apk
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: koe-v${{ github.run_number }}
@@ -34,3 +38,10 @@ jobs:
           target_commitish: ${{ github.sha }}
           prerelease: true
           files: koe-rewrite.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: claudebtn-v${{ github.run_number }}
+          name: Claudeボタン v1.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          files: claude-button.apk

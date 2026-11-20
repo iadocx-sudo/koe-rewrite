@@ -161,6 +161,11 @@ class SettingsActivity : Activity() {
             ScreenTextService.instance?.refreshBubble()
         })
         col.addView(note("浮遊ボタンはドラッグで好きな位置に動かせます（位置は記憶）。"))
+        col.addView(check("Claudeアプリ表示中だけ、ナビバー左に☰（サイドバー開閉）・右に送信ボタンを出す ④が必要", prefs.claudeNav) {
+            prefs.claudeNav = it
+            ScreenTextService.instance?.refreshNav()
+        })
+        col.addView(note("単独アプリ「Claudeボタン」を有効にしている場合は、二重表示を避けてこちらは自動で出しません。"))
 
         col.addView(head("追加ルール（任意）"))
         ruleEdit = EditText(this).apply {

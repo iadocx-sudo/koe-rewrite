@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Claudeボタン</string>
+    <string name="a11y_name">Claudeボタン</string>
+    <string name="a11y_desc">Claudeアプリが前面にあるときだけ、ナビゲーションバーの左に☰（サイドバー開閉）、右に送信ボタンを表示します。画面の内容は送信ボタン等の位置を探すためだけに使い、保存・外部送信はしません。</string>
+</resources>
