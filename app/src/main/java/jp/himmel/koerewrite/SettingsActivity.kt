@@ -59,6 +59,23 @@ class SettingsActivity : Activity() {
         }
         col.addView(statusView, lpTop(12))
 
+        // master ON/OFF for the floating button
+        val master = android.widget.Switch(this).apply {
+            text = "こえリライト ボタン"
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            isChecked = prefs.floatButton
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(Color.parseColor("#FFFFFF")) }
+            setOnCheckedChangeListener { _, b ->
+                prefs.floatButton = b
+                ScreenTextService.instance?.refreshBubble()
+                toast(if (b) "ONにしました（キーボード表示時にボタンが出ます）" else "OFFにしました（ボタンを出しません）")
+            }
+        }
+        col.addView(master, lpTop(12))
+        col.addView(note("通知パネルのクイック設定「こえリライト」タイルからもON/OFFできます。"))
+
         // 1 API key
         col.addView(head("① Gemini APIキー（無料）"))
         keyEdit = EditText(this).apply {

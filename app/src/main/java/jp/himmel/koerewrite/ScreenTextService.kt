@@ -366,12 +366,32 @@ class ScreenTextService : AccessibilityService() {
             toast("こえリライトのキーボードを有効にしてください")
             return
         }
+        // remember the current keyboard (Gboard) so we can return to it exactly
+        val cur = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD) ?: ""
+        if (cur.isNotEmpty() && !cur.startsWith(packageName)) prefs.prevIme = cur
         var ok = false
         if (Build.VERSION.SDK_INT >= 30) {
             ok = try { softKeyboardController.switchToInputMethod(id) } catch (e: Exception) { false }
         }
         if (ok) hideBubble()
         else try { getSystemService(InputMethodManager::class.java)?.showInputMethodPicker() } catch (_: Exception) {}
+    }
+
+    /** Return to the previous keyboard from outside the IME (used as a fallback). */
+    fun switchBack(): Boolean {
+        val id = prefs.prevIme
+        if (id.isEmpty() || Build.VERSION.SDK_INT < 30) return false
+        return try { softKeyboardController.switchToInputMethod(id) } catch (e: Exception) { false }
+    }
+
+    /** Replace the last occurrence of raw with out in the focused field (used after the IME is gone). */
+    fun replaceInField(raw: String, out: String): Boolean {
+        val n = focusedEditable() ?: return false
+        val t = fieldText(n)
+        val i = t.lastIndexOf(raw)
+        if (i < 0) return false
+        val nt = t.substring(0, i) + out + t.substring(i + raw.length)
+        return setFieldText(n, nt)
     }
 
     // ---------------- screenshot ----------------

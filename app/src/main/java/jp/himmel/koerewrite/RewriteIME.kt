@@ -139,14 +139,12 @@ class RewriteIME : InputMethodService() {
         shotBtn.text = shotLabel()
         render()
         if (!restarting && state == State.IDLE && prefs.autoStart && ready()) {
-            // give the mic / recognizer a moment after the keyboard switch
-            status.text = "準備中…"
-            main.postDelayed({ if (state == State.IDLE && isInputViewShown) startListening() }, 450)
+            startListening()
         }
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
-        if (state != State.IDLE) cancel()
+        if (state == State.LISTENING) cancel()
         super.onFinishInputView(finishingInput)
     }
 
@@ -201,11 +199,26 @@ class RewriteIME : InputMethodService() {
     }
 
     private fun goBack() {
+        val prev = prefs.prevIme
+        if (prev.isNotEmpty()) {
+            try { switchInputMethod(prev); return } catch (_: Exception) {}
+            if (ScreenTextService.instance?.switchBack() == true) return
+        }
         val ok = try { switchToPreviousInputMethod() } catch (e: Exception) { false }
         if (!ok) try { switchToNextInputMethod(false) } catch (_: Exception) {}
     }
 
     // ---- continuous dictation: listens until ■, inserts each phrase at once, polishes it in the background ----
+
+    private var readyShown = false
+
+    private fun setMicLook(color: String, label: String) {
+        micBtn.text = label
+        micBtn.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.parseColor(color))
+        }
+    }
 
     private val rawQueue = ArrayList<String>()
     private var busy = false
@@ -247,7 +260,11 @@ class RewriteIME : InputMethodService() {
         sessionCtx = if (screen.isNullOrBlank()) "" else "【画面の会話（参考）】\n$screen\n\n"
         transcriptView.text = ""
         state = State.LISTENING
+        readyShown = false
         render()
+        // not ready yet: grey button until the recognizer says it is listening
+        setMicLook("#BDBDBD", "…")
+        status.text = "準備中…（ブルッと振動したら話してください）"
         listenOnce()
     }
 
@@ -261,7 +278,15 @@ class RewriteIME : InputMethodService() {
         val r = SpeechRecognizer.createSpeechRecognizer(this)
         recognizer = r
         r.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onReadyForSpeech(params: Bundle?) {
+                if (state != State.LISTENING || recognizer !== r) return
+                if (!readyShown) {
+                    readyShown = true
+                    setMicLook("#E53935", "■")
+                    status.text = "● 話してください（間が空いても続きます）　終わったら■"
+                    micBtn.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
+                }
+            }
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
@@ -370,7 +395,7 @@ class RewriteIME : InputMethodService() {
             } catch (e: Throwable) { Result.failure(e) }
             main.post {
                 busy = false
-                if (sid == sessionId) {
+                if (sid == sessionId || !isInputViewShown) {
                     result.onSuccess { prefs.lastError = ""; replaceRaw(raw, it) }
                     result.onFailure { prefs.lastError = it.message ?: it.javaClass.simpleName }
                     pump()
@@ -383,6 +408,11 @@ class RewriteIME : InputMethodService() {
     /** Swap the raw phrase for the polished one, keeping anything typed/spoken after it. */
     private fun replaceRaw(raw: String, out: String) {
         if (out == raw || out.isBlank()) return
+        if (!isInputViewShown) {
+            // keyboard already switched back: edit the field through the accessibility service
+            try { ScreenTextService.instance?.replaceInField(raw, out) } catch (_: Throwable) {}
+            return
+        }
         val ic = currentInputConnection ?: return
         val before = ic.getTextBeforeCursor(4000, 0)?.toString() ?: return
         val idx = before.lastIndexOf(raw)
@@ -409,6 +439,14 @@ class RewriteIME : InputMethodService() {
     private fun afterStop() {
         if (state != State.LISTENING) return
         destroyRecognizer()
+        if (!autoSend) {
+            // return to Gboard right away; pending AI polish is applied in the background
+            state = State.IDLE
+            render()
+            status.text = "✓ 完了"
+            if (prefs.autoReturn) goBack()
+            return
+        }
         state = State.PROCESSING
         render()
         status.text = "仕上げ中…"

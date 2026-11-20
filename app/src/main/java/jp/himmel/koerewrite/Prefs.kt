@@ -58,6 +58,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("voiceEnter", true)
         set(v) = sp.edit().putBoolean("voiceEnter", v).apply()
 
+    /** IME that was active before switching to こえリライト (to return to it reliably) */
+    var prevIme: String
+        get() = sp.getString("prevIme", "") ?: ""
+        set(v) = sp.edit().putString("prevIme", v).apply()
+
     var aiPolish: Boolean
         get() = sp.getBoolean("aiPolish", true)
         set(v) = sp.edit().putBoolean("aiPolish", v).apply()

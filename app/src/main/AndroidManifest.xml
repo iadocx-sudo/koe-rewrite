@@ -47,7 +47,7 @@
             android:name=".WakeTile"
             android:exported="true"
             android:icon="@drawable/ic_fg"
-            android:label="こえリライト起動"
+            android:label="こえリライト"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
