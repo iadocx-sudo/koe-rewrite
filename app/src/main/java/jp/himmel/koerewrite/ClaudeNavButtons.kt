@@ -32,12 +32,9 @@ class ClaudeNavButtons(private val svc: AccessibilityService) {
 
     companion object {
         const val CLAUDE_PKG = "com.anthropic.claude"
+        // サイドバーにだけ並ぶ項目（2つ以上見えたら「開いている」と判定）
         private val DRAWER_WORDS = listOf(
-            "新規セッション", "新規チャット", "スケジュール済みタスク", "最近の項目",
-            "New chat", "New session", "Recents", "Scheduled tasks"
-        )
-        private val MENU_WORDS = listOf(
-            "メニュー", "サイドバー", "ナビゲーション", "ドロワー", "menu", "sidebar", "navigation", "drawer"
+            "スケジュール済みタスク", "Artifacts", "Code", "プロジェクト", "ピン留め", "Scheduled tasks", "Projects", "Starred"
         )
     }
 
@@ -179,55 +176,53 @@ class ClaudeNavButtons(private val svc: AccessibilityService) {
         return if (c != null && c.isClickable && c.isEnabled) c else null
     }
 
-    private fun isDrawerOpen(root: AccessibilityNodeInfo): Boolean {
-        var open = false
+    /** 実際の指タップと同じ操作を送る（ACTION_CLICKだと別画面に飛ぶことがあるため） */
+    private fun tap(x: Float, y: Float) {
+        val p = Path().apply { moveTo(x, y) }
+        svc.dispatchGesture(
+            GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p, 0, 60)).build(),
+            null, null
+        )
+    }
+
+    /** サイドバーが開いているか：サイドバー固有の項目が画面左側に見えているか */
+    private fun isDrawerOpen(root: AccessibilityNodeInfo, sw: Int): Boolean {
+        val r = Rect()
+        var hits = 0
         walk(root, 0) { n ->
-            if (open || !n.isVisibleToUser) return@walk
+            if (!n.isVisibleToUser) return@walk
             val l = label(n)
-            if (l.isNotEmpty() && DRAWER_WORDS.any { l.contains(it, ignoreCase = true) }) open = true
+            if (l.isEmpty() || l.length > 20) return@walk
+            if (DRAWER_WORDS.any { l == it || l.startsWith(it) }) {
+                n.getBoundsInScreen(r)
+                if (r.left >= 0 && r.right < sw * 0.8f) hits++
+            }
         }
-        return open
+        return hits >= 2
     }
 
     private fun toggleDrawer() {
         val win = claudeWindow() ?: return
         val root = win.root ?: return
-        if (isDrawerOpen(root)) {
-            svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        val (sw, sh) = screenSize()
+        if (isDrawerOpen(root, sw)) {
+            // 右側の暗い部分をタップして閉じる（戻るボタンは使わない＝アプリが閉じない）
+            tap(sw * 0.93f, sh * 0.45f)
             return
         }
-        val (sw, sh) = screenSize()
+        // 画面左上の「≡」の位置を探して、そこを指でタップするのと同じ操作をする
         val r = Rect()
-        // 1) ラベルで「メニュー」ボタンを探す
-        var menu: AccessibilityNodeInfo? = null
+        var bx = -1f; var by = -1f; var bestTop = Int.MAX_VALUE
         walk(root, 0) { n ->
-            if (menu != null || !n.isVisibleToUser) return@walk
-            val l = label(n)
-            if (l.isEmpty() || l.length > 30) return@walk
-            if (MENU_WORDS.any { l.contains(it, ignoreCase = true) }) {
-                val c = clickableOf(n) ?: return@walk
-                c.getBoundsInScreen(r)
-                if (r.top < sh * 0.25f) menu = c
-            }
-        }
-        if (menu?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) return
-        // 2) 画面左上で一番上にあるタップ可能な部品（≡ボタン）を押す
-        var best: AccessibilityNodeInfo? = null
-        var bestTop = Int.MAX_VALUE
-        walk(root, 0) { n ->
-            if (!n.isVisibleToUser || !n.isClickable || !n.isEnabled || n.isEditable) return@walk
+            if (!n.isVisibleToUser || !n.isClickable || n.isEditable) return@walk
             n.getBoundsInScreen(r)
-            if (r.centerX() < sw * 0.25f && r.centerY() < sh * 0.2f && r.width() < sw * 0.3f && r.top < bestTop) {
-                bestTop = r.top; best = n
+            if (r.centerX() < sw * 0.2f && r.centerY() < sh * 0.15f && r.width() < sw * 0.25f &&
+                r.height() < sh * 0.1f && r.top < bestTop) {
+                bestTop = r.top; bx = r.exactCenterX(); by = r.exactCenterY()
             }
         }
-        if (best?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) return
-        // 3) 最終手段：左端から右へスワイプ
-        val p = Path().apply { moveTo(2f, sh * 0.5f); lineTo(sw * 0.7f, sh * 0.5f) }
-        svc.dispatchGesture(
-            GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p, 0, 250)).build(),
-            null, null
-        )
+        if (bx < 0) { bx = sw * 0.05f; by = sh * 0.078f }
+        tap(bx, by)
     }
 
     private fun send() {
